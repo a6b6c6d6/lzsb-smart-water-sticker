@@ -2983,7 +2983,14 @@
     try {
       const stanceSel = document.getElementById('lsb-ai-vote-stance');
       const forced = stanceSel ? stanceSel.value : 'auto';
-      const userContent = '下面是论坛帖子内容，请判断它是否值得加精，并严格按系统要求只输出 JSON。\n\n' + scraped.text;
+      let userContent = '下面是论坛帖子内容，请判断它是否值得加精，并严格按系统要求只输出 JSON。\n\n' + scraped.text;
+      // 强制立场前置到生成端：让模型一开始就知道立场，理由文本与所选立场保持一致，
+      // 避免"下拉选反对、模型却写支持理由"的自相矛盾（解析端只翻 vote 字段救不了 reason 文本）
+      if (forced === 'support' || forced === 'oppose') {
+        const stanceLabel = forced === 'support' ? '支持加精' : '反对加精';
+        userContent += '\n\n【用户已决定' + stanceLabel + '】请严格按该立场撰写评议理由，紧扣帖子具体内容说明为何' + (forced === 'support' ? '值得加精' : '不应加精') + '；不得生成与立场相反的内容（例如决定反对时，不要在理由里出现"值得加精/好文/支持"等表述）。';
+        appendLog('检测到强制立场：' + stanceLabel + '，已要求 AI 按此立场撰写理由');
+      }
       // enableSearch 尊重设置开关：开联网时投票也走「规划→按需搜索→汇总」编排，
       // 可查证帖内时效/事实类声明（如"某软件最新版是 X"）；多数申精帖规划后无需搜索会自动降级直接生成
       const voteCfg = Object.assign({}, cfg, { systemPrompt: VOTE_SYSTEM_PROMPT });
