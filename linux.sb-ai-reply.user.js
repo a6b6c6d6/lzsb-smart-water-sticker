@@ -304,6 +304,18 @@
       white-space: pre-wrap; word-break: break-all;
       pointer-events: none;
     }
+    /* 视奸窗内"已固定"的搜索结果详情：点击某行后插入到该行下方，固定查看、不被 hover 抢占 */
+    .lsb-ai-log-line.pinned-tip {
+      cursor: default;
+      background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px;
+      padding: 6px 9px; margin: 2px 0;
+      max-height: 220px; overflow: auto;
+      font-size: 12px; line-height: 1.6; color: #1e293b;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .lsb-ai-log-line.pinned-tip .lsb-ai-log-pin-head { color: #2563eb; font-weight: 600; margin-bottom: 4px; }
+    .lsb-ai-log-line.pinned-tip .lsb-ai-log-pin-close { float: right; cursor: pointer; color: #64748b; font-weight: 400; }
+    .lsb-ai-log-line.pinned-tip .lsb-ai-log-pin-close:hover { color: #dc2626; }
 
     .lsb-ai-preview {
       min-height: 110px;
@@ -1880,6 +1892,8 @@
     if (logBodyEl) logBodyEl.textContent = '';
     const tip = document.querySelector('.lsb-ai-log-tip'); // 清空时收起可能残留的 hover 浮层
     if (tip) tip.style.display = 'none';
+    const pinned = logBodyEl && logBodyEl.querySelector('.lsb-ai-log-line.pinned-tip'); // 同步清掉"已固定"详情
+    if (pinned) pinned.remove();
   }
   function showLog(on) {
     if (!logWrapEl) return;
@@ -2534,6 +2548,47 @@
     });
     logBodyEl.addEventListener('mouseleave', hideLogTip);
     logBodyEl.addEventListener('scroll', () => { if (logTipVisible) hideLogTip(); }); // 滚动时收起浮层防错位
+
+    // 视奸窗点击固定：点带 data-tip 的行 → 在该行下方插入常驻详情块，再点同一行/点关闭 → 取消
+    let pinnedTipLine = null;
+    const removePinnedTip = () => {
+      const p = logBodyEl && logBodyEl.querySelector('.lsb-ai-log-line.pinned-tip');
+      if (p) p.remove();
+      pinnedTipLine = null;
+    };
+    const showPinnedTip = (line) => {
+      const tipText = line.getAttribute('data-tip');
+      if (!tipText) return;
+      removePinnedTip();
+      const div = document.createElement('div');
+      div.className = 'lsb-ai-log-line pinned-tip';
+      const head = document.createElement('div');
+      head.className = 'lsb-ai-log-pin-head';
+      head.appendChild(document.createTextNode('📌 已固定（搜索结果全文，可滚动查看）'));
+      const close = document.createElement('span');
+      close.className = 'lsb-ai-log-pin-close';
+      close.textContent = '✕ 收起';
+      close.addEventListener('click', (e) => { e.stopPropagation(); removePinnedTip(); });
+      head.appendChild(close);
+      div.appendChild(head);
+      const body = document.createElement('div');
+      body.textContent = tipText;
+      div.appendChild(body);
+      // 阻止详情块内部点击冒泡到外层行的 toggle 逻辑
+      div.addEventListener('click', (e) => { e.stopPropagation(); });
+      line.insertAdjacentElement('afterend', div);
+      pinnedTipLine = line;
+    };
+    logBodyEl.addEventListener('click', (e) => {
+      // 忽略详情块内部（关闭按钮已 stopPropagation）
+      if (e.target.closest && e.target.closest('.lsb-ai-log-line.pinned-tip')) return;
+      const line = e.target.closest && e.target.closest('.lsb-ai-log-line[data-tip]');
+      if (!line) return;
+      if (pinnedTipLine === line) removePinnedTip();
+      else showPinnedTip(line);
+    });
+    // ESC 收起已固定的详情
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') removePinnedTip(); });
 
     fab = document.createElement('button');
     fab.id = FAB_ID;
