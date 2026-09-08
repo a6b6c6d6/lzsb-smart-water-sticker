@@ -1851,8 +1851,8 @@
         .catch((e) => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
       ress.forEach((r, idx) => {
         const ok = r.searched !== false && !/^\(搜索失败/.test(r.text);
-        // 成功时把搜索结果正文作为 tip 挂在行上，鼠标停住可看内容
-        progress('  ✓ ' + batch[idx].label + '：' + (ok ? (r.text.length + ' 字') : '失败/无结果'), ok ? 'done' : 'warn', ok ? r.text : undefined);
+        // 成功：tip 挂搜索结果正文；失败：tip 挂失败原因（反爬/超时/HTTP 状态），hover/点击固定可诊断
+        progress('  ✓ ' + batch[idx].label + '：' + (ok ? (r.text.length + ' 字') : '失败/无结果'), ok ? 'done' : 'warn', r.text || undefined);
         searchTexts.push('【关键词：' + batch[idx].label + '】\n' + r.text);
       });
     }
