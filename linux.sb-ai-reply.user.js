@@ -2276,13 +2276,17 @@
     appendLog(msg, kind, tip);
   }
 
-  /* ===== 视奸窗详情交互（两级：hover 轻预览 + 点击详情弹窗） ===== */
+  /* ===== 视奸窗详情：点击行 → 弹窗（结构化卡片渲染） ===== */
 
   // 把详情文本渲染成节点：URL 变可点击链接（createElement 构造，不用 innerHTML）。
-  // 深抓明细（含 [页面正文] 段的多条目格式）改走结构化渲染：每条一个可折叠块
+  // 深抓明细（[n] 条目 + [页面正文]）→ 深抓卡片；搜索结果（"N. 标题\n链接：…"）→ 结果卡片；
+  // 其余文本 → 纯文本 + 链接化兜底。
   function renderTipContent(text) {
     if (text.indexOf('[页面正文') >= 0 || text.indexOf('深抓明细') >= 0) {
       return renderDeepDetail(text);
+    }
+    if (/(^|\n)\s*\d+\.\s+\S/.test(text) && /\n\s*链接：/.test(text)) {
+      return renderSearchDetail(text);
     }
     const wrap = document.createElement('div');
     return appendTextWithLinks(wrap, text);
@@ -2357,59 +2361,51 @@
     return wrap;
   }
 
-  /* ----- hover 轻预览：延迟 180ms 出现、锚定行（不跟鼠标）、可移入交互 ----- */
-  let logPreviewEl = null;
-  let logPreviewTimer = null;
-  let logPreviewHideTimer = null;
-  let logPreviewFor = null; // 当前预览对应的行（node 引用）
-
-  function hideLogPreview() {
-    if (logPreviewTimer) { clearTimeout(logPreviewTimer); logPreviewTimer = null; }
-    if (logPreviewHideTimer) { clearTimeout(logPreviewHideTimer); logPreviewHideTimer = null; }
-    if (logPreviewEl) logPreviewEl.style.display = 'none';
-    logPreviewFor = null;
-  }
-  // 延迟收起：给鼠标留 120ms 穿越间隙（从行移到预览浮层上），中途移回则取消
-  function scheduleHideLogPreview() {
-    if (logPreviewHideTimer) return;
-    logPreviewHideTimer = setTimeout(() => { logPreviewHideTimer = null; hideLogPreview(); }, 120);
-  }
-  function scheduleLogPreview(line) {
-    if (logPreviewHideTimer) { clearTimeout(logPreviewHideTimer); logPreviewHideTimer = null; } // 移回取消收起
-    if (logPreviewFor === line) return; // 已在预览本行
-    if (logPreviewTimer) clearTimeout(logPreviewTimer);
-    logPreviewTimer = setTimeout(() => {
-      logPreviewTimer = null;
-      showLogPreview(line);
-    }, 180);
-  }
-  function showLogPreview(line) {
-    const tipText = line.getAttribute('data-tip');
-    if (!tipText || !tipText.trim()) return;
-    if (!logPreviewEl) {
-      logPreviewEl = document.createElement('div');
-      logPreviewEl.className = 'lsb-ai-log-tip';
-      document.body.appendChild(logPreviewEl);
-      // 预览自身可交互：移入即取消收起，离开才收起（与旧版 pointer-events:none 的区别）
-      logPreviewEl.addEventListener('mouseover', () => { if (logPreviewHideTimer) { clearTimeout(logPreviewHideTimer); logPreviewHideTimer = null; } });
-      logPreviewEl.addEventListener('mouseleave', scheduleHideLogPreview);
-      // 预览内点击不冒泡触发外层（避免点链接时误开详情弹窗）
-      logPreviewEl.addEventListener('click', (e) => { e.stopPropagation(); });
+  // 搜索结果结构化渲染：按「N. 标题」切块，每条一张可折叠卡片（复用深抓卡片样式；无状态徽标）
+  function renderSearchDetail(text) {
+    const wrap = document.createElement('div');
+    const lines = text.split('\n');
+    let headM = null;
+    let cur = [];
+    const HEAD = /^(\d+)\.\s+(.*)$/; // 1. 标题
+    const flush = () => {
+      if (!headM) return;
+      const item = document.createElement('div');
+      item.className = 'lsb-ai-deep-item';
+      const head = document.createElement('div');
+      head.className = 'lsb-ai-deep-item-head';
+      const arrow = document.createElement('span');
+      arrow.className = 'lsb-ai-deep-arrow';
+      arrow.textContent = '▸';
+      head.appendChild(arrow);
+      const label = headM[1] + '. ' + headM[2];
+      const title = document.createElement('span');
+      title.className = 'lsb-ai-deep-title';
+      title.textContent = label;
+      title.title = label;
+      head.appendChild(title);
+      head.addEventListener('click', () => item.classList.toggle('open'));
+      item.appendChild(head);
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'lsb-ai-deep-item-body';
+      appendTextWithLinks(bodyEl, cur.join('\n').trim());
+      item.appendChild(bodyEl);
+      wrap.appendChild(item);
+      headM = null; cur = [];
+    };
+    for (const ln of lines) {
+      const h = ln.match(HEAD);
+      if (h) { flush(); headM = h; cur = []; continue; }
+      if (headM) cur.push(ln);
     }
-    logPreviewEl.textContent = '';
-    logPreviewEl.appendChild(renderTipContent(tipText));
-    logPreviewEl.style.display = 'block';
-    logPreviewFor = line;
-    // 锚定行：预览出现在行的左下方，随行定位（不跟鼠标）；放不下再翻到上方/左侧
-    const r = line.getBoundingClientRect();
-    const pw = Math.min(480, window.innerWidth - 24);
-    let left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
-    let top = r.bottom + 6;
-    const ph = logPreviewEl.getBoundingClientRect().height;
-    if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
-    logPreviewEl.style.left = left + 'px';
-    logPreviewEl.style.top = top + 'px';
+    flush();
+    if (!wrap.childNodes.length) { appendTextWithLinks(wrap, text); } // 兜底：格式对不上按纯文本+链接
+    return wrap;
   }
+
+  /* ----- hover 轻预览已停用（用户选择仅点击弹窗）；保留 hideLogPreview 供 scroll/ESC/clearLog 兜底 ----- */
+  let logPreviewEl = null;
+  function hideLogPreview() { if (logPreviewEl) logPreviewEl.style.display = 'none'; }
 
   /* ----- 详情弹窗：复用 .lsb-ai-modal 遮罩，长文细读 / 复制全文 ----- */
   let logDetailEl = null;
@@ -3082,18 +3078,8 @@
       logWrapEl.classList.toggle('collapsed');
     });
 
-    // 视奸窗详情交互：hover 延迟出「轻预览」（锚定行、可移入滚动/选中/点链接），点击行开「详情弹窗」细读
-    logBodyEl.addEventListener('mouseover', (e) => {
-      const line = (e.target.closest && e.target.closest('.lsb-ai-log-line[data-tip]')) || null;
-      if (line) scheduleLogPreview(line);
-    });
-    logBodyEl.addEventListener('mouseout', (e) => {
-      const line = e.target.closest && e.target.closest('.lsb-ai-log-line[data-tip]');
-      if (!line) return;
-      if (e.relatedTarget && line.contains(e.relatedTarget)) return; // 行内子元素间移动，不算离开
-      scheduleHideLogPreview();
-    });
-    logBodyEl.addEventListener('scroll', hideLogPreview); // 日志区滚动会使锚定行位移，直接收起防错位
+    // 视奸窗详情交互：去掉 hover 浮层，仅保留「点击行 → 详情弹窗」细读
+    logBodyEl.addEventListener('scroll', hideLogPreview); // 残留预览收起防错位
     logBodyEl.addEventListener('click', (e) => {
       const line = e.target.closest && e.target.closest('.lsb-ai-log-line[data-tip]');
       if (!line) return;
