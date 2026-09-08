@@ -1506,6 +1506,23 @@
   // 可重试的失败状态码：上游临时不可用 / 限流类（401/403/400 等不重试）
   const RETRIABLE_STATUS = [408, 429, 500, 502, 503, 504, 529];
 
+  // 生成请求参数摘要（不含 apiKey），拼进 4xx 报错，方便定位「源站拒绝参数」类问题（如模型名不匹配/字段不被支持）
+  function describeRequest(req) {
+    const b = (req && req.body) ? req.body : {};
+    const toolCount = Array.isArray(b.tools) ? b.tools.length : 0;
+    const maxT = (b.max_tokens !== undefined) ? b.max_tokens : (b.max_output_tokens !== undefined ? b.max_output_tokens : undefined);
+    const apiFmt = req && req.isAnthropic ? 'anthropic' : (req && req.isChat ? 'chat' : 'responses');
+    const parts = ['url=' + ((req && req.url) || '-')];
+    parts.push('apiFormat=' + apiFmt);
+    if (b.model !== undefined) parts.push('model=' + b.model);
+    if (maxT !== undefined) parts.push('maxTokens=' + maxT);
+    if (b.temperature !== undefined) parts.push('temperature=' + b.temperature);
+    parts.push('tools=' + (toolCount ? toolCount + '个' : '无'));
+    parts.push('stream=' + (b.stream ? 'on' : 'off'));
+    parts.push('msgCount=' + (Array.isArray(b.messages) ? b.messages.length : '-'));
+    return parts.join(' | ');
+  }
+
   // 单次请求并解析，返回 { text, searched }；失败时给 error 打 retriable 标记供上层判断
   function sendRequestOnce(req) {
     const timeoutMs = req.timeout || 180000;
@@ -1544,7 +1561,7 @@
               }
             }
           } else {
-            const err = new Error(apiErrorMessage(status, raw));
+            const err = new Error(apiErrorMessage(status, raw) + ' 【请求参数】' + describeRequest(req));
             err.retriable = RETRIABLE_STATUS.indexOf(status) >= 0; // 503 等临时错误可重试
             reject(err);
           }
@@ -1664,7 +1681,7 @@
               }
             }
           } else {
-            const err = new Error(apiErrorMessage(status, raw));
+            const err = new Error(apiErrorMessage(status, raw) + ' 【请求参数】' + describeRequest(req));
             err.retriable = RETRIABLE_STATUS.indexOf(status) >= 0;
             reject(err);
           }
