@@ -1485,7 +1485,7 @@
           let text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
           // 去除明显的模板噪音（导航词堆叠等场景无法完全规避，先保证长度与可读性）
           if (text.length < 80) { reject(new Error('正文过短（可能需登录或 JS 渲染）')); return; }
-          resolve(text.slice(0, 2000));
+          resolve(text.slice(0, 4000)); // 单条上限 4000 字：兼顾关键内容（长文后段：经历/争议/评价）与请求体大小
         },
         onerror: () => reject(new Error('网络错误')),
         ontimeout: () => reject(new Error('超时(' + t + 's)')),
@@ -1925,7 +1925,14 @@
 
     // 阶段4：汇总生成（不带搜索工具，附上下文约束纠错指导）
     progress('搜索完成，正在汇总生成回帖…');
-    const finalContent = finalUserContent + '\n\n【注意】若下面的搜索结果中出现了与帖子原文名称不一致的正确写法（如产品名、会员名、品牌名等），请结合帖子整体上下文判断作者真正想表达的，并在回帖中使用正确写法，不要照搬帖子里的明显拼写错误。\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + searchTexts.join('\n\n');
+    // 汇总护栏：单条深抓上限 4000（fetchPageText）已控制单词体量，这里再按总字数截断，
+    // 防止「多关键词 × 各深抓 2 条」把上下文撑爆；靠前关键词的搜索结果优先保留
+    const SEARCH_SUMMARY_LIMIT = 16000;
+    const rawSearchBlock = searchTexts.join('\n\n');
+    const clippedSearch = rawSearchBlock.length > SEARCH_SUMMARY_LIMIT
+      ? rawSearchBlock.slice(0, SEARCH_SUMMARY_LIMIT) + '\n\n……（搜索结果总量超 ' + SEARCH_SUMMARY_LIMIT + ' 字已截断，以上为保留部分）'
+      : rawSearchBlock;
+    const finalContent = finalUserContent + '\n\n【注意】若下面的搜索结果中出现了与帖子原文名称不一致的正确写法（如产品名、会员名、品牌名等），请结合帖子整体上下文判断作者真正想表达的，并在回帖中使用正确写法，不要照搬帖子里的明显拼写错误。\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + clippedSearch;
     const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
     const r = await streamFinal(req);
     return { text: r.text, searched: true };
