@@ -1532,9 +1532,19 @@
           // 对前 deepK 条逐条深抓（串行，避免对目标站并发触发反爬），失败项保留摘要
           const targets = items.slice(0, deepK);
           const deepMap = {};
+          // 本站页面（含正在看的原帖，被搜索引擎收录后会命中自己）跳过深抓：
+          // 正文已在抓帖阶段拿到，深抓纯属重复且易撞登录墙，保留搜索摘要即可
+          const isSameSite = (u) => {
+            try { return new URL(u, location.href).hostname === location.hostname; } catch (e) { return false; }
+          };
           const run = (i) => {
             if (i >= targets.length) { resolve(formatItems(items, deepMap)); return; }
             const it = targets[i];
+            if (isSameSite(it.url)) {
+              step('  ↷ ' + it.title.slice(0, 30) + '：本站页面（原帖/论坛收录），跳过深抓，保留摘要');
+              run(i + 1);
+              return;
+            }
             step('  ↧ 深抓 ' + (i + 1) + '/' + targets.length + '：' + (it.url.length > 90 ? it.url.slice(0, 90) + '…' : it.url), it.url);
             fetchPageText(it.url, 12).then((txt) => {
               deepMap[items.indexOf(it)] = txt;
