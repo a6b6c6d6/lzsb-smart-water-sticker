@@ -368,7 +368,7 @@
     }
     .lsb-ai-model-caret:hover, .lsb-ai-model-dd.open .lsb-ai-model-caret { color: #2563eb; }
     .lsb-ai-model-caret:hover { background: #f3f4f6; }
-    #lsb-ai-model-fetch, #lsb-ai-test { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
+    #lsb-ai-model-fetch { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
     .lsb-ai-model-menu {
       display: none;
       position: absolute;
@@ -381,7 +381,15 @@
       box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
     }
     .lsb-ai-model-dd.open .lsb-ai-model-menu { display: block; }
-    .lsb-ai-model-filter { margin-bottom: 6px; padding: 6px 9px; }
+    .lsb-ai-model-tools { display: flex; gap: 5px; margin-bottom: 6px; }
+    .lsb-ai-model-tools .lsb-ai-model-filter { margin-bottom: 0; padding: 6px 9px; flex: 1; min-width: 0; }
+    .lsb-ai-model-tbtn {
+      flex: 0 0 auto; padding: 5px 8px; white-space: nowrap;
+      font-size: 12px; border: 1px solid #d1d5db; border-radius: 6px;
+      background: #fff; color: #374151; cursor: pointer;
+    }
+    .lsb-ai-model-tbtn:hover { background: #f3f4f6; }
+    .lsb-ai-model-tbtn:disabled { opacity: .55; cursor: wait; }
     .lsb-ai-model-list { max-height: 220px; overflow-y: auto; }
     .lsb-ai-model-item {
       padding: 6px 8px;
@@ -400,6 +408,9 @@
     .lsb-ai-model-state.st-ok { color: #059669; }
     .lsb-ai-model-state.st-bad { color: #dc2626; }
     .lsb-ai-model-state.st-test { color: #d97706; }
+    /* 条目 hover 单测入口 */
+    .lsb-ai-model-run { display: none; flex: 0 0 auto; font-size: 12px; color: #2563eb; padding: 0 3px; }
+    .lsb-ai-model-item:hover .lsb-ai-model-run { display: inline-block; }
 
     /* 语气 / 提示词选择行 */
     .lsb-ai-persona-line { display: flex; gap: 6px; align-items: stretch; }
@@ -731,15 +742,25 @@
       .catch((e) => ({ ok: false, info: shortErr(e && e.message) || '不可用' }));
   }
   // 打开模型下拉时对列表逐个体检（串行防限流；120 秒缓存内不重测已测模型）
-  async function runModelHealthCheck() {
+  // 全量体检：force=true 时无视 120s 缓存强制重测全部；由「🩺体检全部」按钮手动触发（不自动跑）
+  async function runModelHealthCheck(force) {
     if (modelHealthBusy || !modelOptions.length) return;
-    const now = Date.now();
-    const pending = modelOptions.filter((m) => {
-      const ts = modelTestTs[m];
-      return !(ts && (now - ts) < 120000 && (modelState[m] && modelState[m].t !== 'test'));
-    });
+    const allBtn = document.getElementById('lsb-ai-model-test-all');
+    let pending;
+    if (force) {
+      for (const k of Object.keys(modelState)) delete modelState[k];
+      for (const k of Object.keys(modelTestTs)) delete modelTestTs[k];
+      pending = modelOptions.slice();
+    } else {
+      const now = Date.now();
+      pending = modelOptions.filter((m) => {
+        const ts = modelTestTs[m];
+        return !(ts && (now - ts) < 120000 && (modelState[m] && modelState[m].t !== 'test'));
+      });
+    }
     if (!pending.length) return;
     modelHealthBusy = true;
+    if (allBtn) { allBtn.disabled = true; allBtn.textContent = '体检中…'; }
     const filterEl = document.getElementById('lsb-ai-model-filter');
     for (const m of pending) {
       modelState[m] = { t: 'test', info: '' };
@@ -751,6 +772,19 @@
       if (!r.ok) await new Promise((res) => setTimeout(res, 200)); // 失败稍歇，防连发触发限流
     }
     modelHealthBusy = false;
+    if (allBtn) { allBtn.disabled = false; allBtn.textContent = '🩺体检全部'; }
+  }
+
+  // 单测单个模型（hover ⚡）：无视缓存强制重测该条并刷新徽标
+  async function forceTestOneModel(m) {
+    if (modelHealthBusy || !m) return;
+    const filterEl = document.getElementById('lsb-ai-model-filter');
+    modelState[m] = { t: 'test', info: '' };
+    renderModelMenu(filterEl ? filterEl.value : '');
+    const r = await pingOneModel(m);
+    modelState[m] = { t: r.ok ? 'ok' : 'bad', info: r.ok ? '' : r.info };
+    modelTestTs[m] = Date.now();
+    renderModelMenu(filterEl ? filterEl.value : '');
   }
 
   // 按筛选词渲染模型下拉菜单条目（筛选框与主输入框独立，互不干扰）
@@ -783,6 +817,12 @@
       label.textContent = m;
       label.title = m; // 模型名过长省略时 hover 看全名
       item.appendChild(label);
+      const run = document.createElement('span');
+      run.className = 'lsb-ai-model-run';
+      run.textContent = '⚡';
+      run.title = '单测此模型（无视缓存，真发 ping）';
+      run.dataset.model = m;
+      item.appendChild(run);
       // 存活状态徽标：✅可用 / ❌失效(原因) / ⏳测试中；未测过不显示
       const st = modelState[m];
       if (st) {
@@ -829,9 +869,10 @@
     const cfg = readConfigFromUI();
     const err = validateConfig(cfg);
     if (err) { setStatus(err, 'error'); document.getElementById('lsb-ai-settings').open = true; return; }
-    const btn = document.getElementById('lsb-ai-test');
-    const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '🔌 测试'; } };
+    const btn = document.getElementById('lsb-ai-model-test-cur');
+    const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '🔌测当前'; } };
     if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
+    const curModel = (cfg && cfg.model) ? String(cfg.model).trim() : '';
     // 复用真实请求构造（headers/body 与实际生成一致，测的就是实际生效的配置）
     const req = buildRequest(cfg, { system: '只回复一个词：pong', userContent: 'ping', images: undefined, tools: undefined });
     req.timeout = 20000; // 测试等不了 180s 生成超时
@@ -839,11 +880,13 @@
     appendLog('🔌 连接测试：' + (req.url || '') + ' | model=' + ((req.body && req.body.model) || '?'), 'info');
     sendRequestOnce(req).then((r) => {
       restoreBtn();
+      if (curModel && modelOptions.indexOf(curModel) >= 0) { modelState[curModel] = { t: 'ok', info: '' }; modelTestTs[curModel] = Date.now(); renderModelMenu(document.getElementById('lsb-ai-model-filter') ? document.getElementById('lsb-ai-model-filter').value : ''); }
       const reply = String((r && r.text) || '').trim().slice(0, 150);
       appendLog(reply ? ('✅ 连接正常，模型回应：' + reply) : '✅ 连接与 Key 正常（模型未返回正文——多为思考型模型把短配额吃完，不影响可用性判断）', 'done');
       setStatus(reply ? ('✅ 连接正常，模型回应：' + reply) : '✅ 连接与 Key 正常（模型未返回正文，多为思考型，可用性判定为通过）', 'ok');
     }).catch((e) => {
       restoreBtn();
+      if (curModel && modelOptions.indexOf(curModel) >= 0) { modelState[curModel] = { t: 'bad', info: shortErr(e && e.message) }; modelTestTs[curModel] = Date.now(); renderModelMenu(document.getElementById('lsb-ai-model-filter') ? document.getElementById('lsb-ai-model-filter').value : ''); }
       const msg = (e && e.message) ? e.message : '未知错误';
       appendLog('❌ 连接测试失败：' + msg, 'warn');
       setStatus('❌ 测试失败：' + msg, 'error');
@@ -2570,14 +2613,17 @@
                   <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" placeholder="gpt-4.1-mini" autocomplete="off">
                   <button type="button" class="lsb-ai-model-caret" id="lsb-ai-model-caret" tabindex="-1" title="展开模型列表">▾</button>
                   <div class="lsb-ai-model-menu" id="lsb-ai-model-menu">
-                    <input class="lsb-ai-input lsb-ai-model-filter" id="lsb-ai-model-filter" type="text" placeholder="🔍 筛选模型…" autocomplete="off">
+                    <div class="lsb-ai-model-tools">
+                      <input class="lsb-ai-input lsb-ai-model-filter" id="lsb-ai-model-filter" type="text" placeholder="🔍 筛选模型…" autocomplete="off">
+                      <button type="button" class="lsb-ai-model-tbtn" id="lsb-ai-model-test-cur" title="测试当前输入框中的模型（真发 ping）">🔌测当前</button>
+                      <button type="button" class="lsb-ai-model-tbtn" id="lsb-ai-model-test-all" title="对列表全部模型逐个测试，标 ✅/❌">🩺体检全部</button>
+                    </div>
                     <div class="lsb-ai-model-list" id="lsb-ai-model-list-box"></div>
                   </div>
                 </div>
                 <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-model-fetch" title="从当前 Base URL / Key 拉取可用模型列表">拉取</button>
-                <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-test" title="用当前配置真发一个请求测试连通性（公益/免费模型易失效，测试最靠谱）">🔌 测试</button>
               </div>
-              <span class="lsb-ai-hint">点「拉取」获取模型列表 → 点右侧 ▾ 展开、上方小框筛选、点一条即选中；模型框本身仍可手动输入</span>
+              <span class="lsb-ai-hint">点「拉取」获取模型列表 → 点 ▾ 展开：顶部可筛选、「🔌测当前」测输入框模型、「🩺体检全部」批量测；hover 条目点 ⚡ 单测该条；点条目即选中。模型框本身可手动输入</span>
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">请求格式</label>
@@ -2829,8 +2875,10 @@
 
     // 模型列表：拉取按钮 + 载入时用激活预设缓存回填
     document.getElementById('lsb-ai-model-fetch').addEventListener('click', fetchModels);
-    const testBtn = document.getElementById('lsb-ai-test');
-    if (testBtn) testBtn.addEventListener('click', testConnection);
+    const testCurBtn = document.getElementById('lsb-ai-model-test-cur');
+    if (testCurBtn) testCurBtn.addEventListener('click', testConnection);
+    const testAllBtn = document.getElementById('lsb-ai-model-test-all');
+    if (testAllBtn) testAllBtn.addEventListener('click', () => runModelHealthCheck(true));
     populateModelListFromActiveProfile();
 
     // 模型自定义筛选下拉：▾ 展开 / 独立筛选框 / 点条目选中（筛选框与主输入框功能不重合）
@@ -2843,7 +2891,7 @@
       renderModelMenu('');
       modelDd.classList.add('open');
       if (modelFilter) setTimeout(() => modelFilter.focus(), 0);
-      runModelHealthCheck(); // 打开即体检：逐模型标 ✅/❌/⏳（120s 缓存内不重测）
+      // 不再自动体检；需手动「🔌测当前 / 🩺体检全部 / hover⚡单测」
     };
     const closeModelMenu = () => modelDd.classList.remove('open');
     document.getElementById('lsb-ai-model-caret').addEventListener('click', (e) => {
@@ -2853,6 +2901,9 @@
     });
     modelFilter.addEventListener('input', () => renderModelMenu(modelFilter.value));
     modelListBox.addEventListener('click', (e) => {
+      // hover ⚡ 单测该模型（不选中、不关菜单）
+      const run = e.target.closest('.lsb-ai-model-run');
+      if (run && run.dataset.model) { e.stopPropagation(); forceTestOneModel(run.dataset.model); return; }
       const item = e.target.closest('.lsb-ai-model-item');
       if (!item) return;
       modelInput.value = item.dataset.model;
