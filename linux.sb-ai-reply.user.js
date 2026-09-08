@@ -291,6 +291,7 @@
     .lsb-ai-log-line { padding: 1px 0; word-break: break-all; }
     .lsb-ai-log-line .lsb-ai-log-idx { color: #94a3b8; margin-right: 6px; }
     .lsb-ai-log-line.lsb-kw { color: #7c3aed; }
+    .lsb-ai-log-line.lsb-deep { color: #0e7490; } /* 深抓汇总行：青色，与关键词紫/成功绿区分 */
     .lsb-ai-log-line.lsb-warn { color: #d97706; }
     .lsb-ai-log-line.lsb-done { color: #059669; }
     /* 视奸窗 hover 悬浮详情：搜索结果内容浮层（body 级，避免被滚动容器裁剪） */
@@ -861,36 +862,6 @@
       ? p.models
       : getModelBaseCache(curBase);
     if (list && list.length) populateModelList(list);
-  }
-
-  // 连通性测试：用当前表单配置真发一个最小请求（非流式、短超时），验证 Base URL/Key/模型/格式可用性。
-  // 公益/免费模型经常失效，模型列表拉得到 ≠ 能出内容，真发请求最靠谱。
-  function testConnection() {
-    const cfg = readConfigFromUI();
-    const err = validateConfig(cfg);
-    if (err) { setStatus(err, 'error'); document.getElementById('lsb-ai-settings').open = true; return; }
-    const btn = document.getElementById('lsb-ai-model-test-cur');
-    const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '🔌测当前'; } };
-    if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
-    const curModel = (cfg && cfg.model) ? String(cfg.model).trim() : '';
-    // 复用真实请求构造（headers/body 与实际生成一致，测的就是实际生效的配置）
-    const req = buildRequest(cfg, { system: '只回复一个词：pong', userContent: 'ping', images: undefined, tools: undefined });
-    req.timeout = 20000; // 测试等不了 180s 生成超时
-    setStatus('正在测试连接（发送 ping…）', 'loading');
-    appendLog('🔌 连接测试：' + (req.url || '') + ' | model=' + ((req.body && req.body.model) || '?'), 'info');
-    sendRequestOnce(req).then((r) => {
-      restoreBtn();
-      if (curModel && modelOptions.indexOf(curModel) >= 0) { modelState[curModel] = { t: 'ok', info: '' }; modelTestTs[curModel] = Date.now(); renderModelMenu(document.getElementById('lsb-ai-model-filter') ? document.getElementById('lsb-ai-model-filter').value : ''); }
-      const reply = String((r && r.text) || '').trim().slice(0, 150);
-      appendLog(reply ? ('✅ 连接正常，模型回应：' + reply) : '✅ 连接与 Key 正常（模型未返回正文——多为思考型模型把短配额吃完，不影响可用性判断）', 'done');
-      setStatus(reply ? ('✅ 连接正常，模型回应：' + reply) : '✅ 连接与 Key 正常（模型未返回正文，多为思考型，可用性判定为通过）', 'ok');
-    }).catch((e) => {
-      restoreBtn();
-      if (curModel && modelOptions.indexOf(curModel) >= 0) { modelState[curModel] = { t: 'bad', info: shortErr(e && e.message) }; modelTestTs[curModel] = Date.now(); renderModelMenu(document.getElementById('lsb-ai-model-filter') ? document.getElementById('lsb-ai-model-filter').value : ''); }
-      const msg = (e && e.message) ? e.message : '未知错误';
-      appendLog('❌ 连接测试失败：' + msg, 'warn');
-      setStatus('❌ 测试失败：' + msg, 'error');
-    });
   }
 
   // 从当前 baseUrl/key 拉取模型列表（GET /models），填进下拉，并缓存到匹配的预设
@@ -1668,7 +1639,8 @@
             return s;
           }).join('\n');
           if (!deepK) { resolve(formatItems(items, {})); return; }
-          // 对前 deepK 条逐条深抓（串行，避免对目标站并发触发反爬），失败项保留摘要
+          // 对前 deepK 条逐条深抓（串行，避免对目标站并发触发反爬），失败项保留摘要。
+          // 过程不再逐条刷视奸窗（太杂），完成后只落一行汇总（青色），hover/点击固定可看全部明细
           const targets = items.slice(0, deepK);
           const deepMap = {};
           // 本站页面（含正在看的原帖，被搜索引擎收录后会命中自己）跳过深抓：
@@ -1676,21 +1648,34 @@
           const isSameSite = (u) => {
             try { return new URL(u, location.href).hostname === location.hostname; } catch (e) { return false; }
           };
+          const deepSteps = []; // { title,url,ok,skip,info,text }
           const run = (i) => {
-            if (i >= targets.length) { resolve(formatItems(items, deepMap)); return; }
+            if (i >= targets.length) {
+              if (deepSteps.length) {
+                const okN = deepSteps.filter((s) => s.ok).length;
+                const badN = deepSteps.filter((s) => !s.ok && !s.skip).length;
+                const skipN = deepSteps.filter((s) => s.skip).length;
+                const detail = deepSteps.map((s, k) => {
+                  const st = s.ok ? ('✅正文 ' + s.text.length + ' 字') : (s.skip ? '⏭ 本站页面跳过' : ('❌' + (s.info || '失败') + '（保留摘要）'));
+                  return '[' + (k + 1) + '] ' + (s.title || '') + ' ' + st + '\n链接：' + s.url + (s.text ? ('\n\n' + s.text) : '');
+                }).join('\n\n');
+                step('  🕳 深抓完成：成功 ' + okN + (badN ? (' · 失败 ' + badN) : '') + (skipN ? (' · 跳过 ' + skipN) : '') + '（点开看明细）', '深抓明细：\n\n' + detail);
+              }
+              resolve(formatItems(items, deepMap));
+              return;
+            }
             const it = targets[i];
             if (isSameSite(it.url)) {
-              step('  ↷ ' + it.title.slice(0, 30) + '：本站页面（原帖/论坛收录），跳过深抓，保留摘要');
+              deepSteps.push({ title: it.title, url: it.url, ok: false, skip: true });
               run(i + 1);
               return;
             }
-            step('  ↧ 深抓 ' + (i + 1) + '/' + targets.length + '：' + (it.url.length > 90 ? it.url.slice(0, 90) + '…' : it.url), it.url);
             fetchPageText(it.url, 12).then((txt) => {
               deepMap[items.indexOf(it)] = txt;
-              step('    ✓ ' + it.title.slice(0, 30) + '：正文 ' + txt.length + ' 字', '【' + it.title + '】\n链接：' + it.url + '\n\n' + txt);
+              deepSteps.push({ title: it.title, url: it.url, ok: true, text: txt });
               run(i + 1);
             }).catch((e) => {
-              step('    ↷ ' + it.title.slice(0, 30) + '：深抓失败（' + (e.message || e) + '），保留摘要', '深抓失败：' + it.url + '\n' + (e.message || e));
+              deepSteps.push({ title: it.title, url: it.url, ok: false, info: (e && e.message) || '失败' });
               run(i + 1);
             });
           };
@@ -2057,7 +2042,7 @@
       // bing/ddg：脚本用 GM_xmlhttpRequest 直连搜索引擎自己抓（免Key、不依赖中转站）；api：沿用中转站内置 web_search 子请求
       const useClientSearch = cfg.searchEngine !== 'api';
       const tasks = batch.map((item) => useClientSearch
-        ? clientWebSearch(cfg, item.query, (m, tip) => appendLog(m, 'kw', tip), item.deepK) // 深抓进度直进视奸窗（紫）；浅查词 deepK=0 跳过深抓
+        ? clientWebSearch(cfg, item.query, (m, tip) => appendLog(m, 'deep', tip), item.deepK) // 深抓汇总行（青色）；浅查词 deepK=0 无此行
         : sendRequest(buildRequest(cfg, {
             system: '你是一个联网搜索助手。请对用户给出的关键词执行联网搜索，并把搜索结果的内容整理出来。',
             userContent: item.query,
@@ -2615,7 +2600,6 @@
                   <div class="lsb-ai-model-menu" id="lsb-ai-model-menu">
                     <div class="lsb-ai-model-tools">
                       <input class="lsb-ai-input lsb-ai-model-filter" id="lsb-ai-model-filter" type="text" placeholder="🔍 筛选模型…" autocomplete="off">
-                      <button type="button" class="lsb-ai-model-tbtn" id="lsb-ai-model-test-cur" title="测试当前输入框中的模型（真发 ping）">🔌测当前</button>
                       <button type="button" class="lsb-ai-model-tbtn" id="lsb-ai-model-test-all" title="对列表全部模型逐个测试，标 ✅/❌">🩺体检全部</button>
                     </div>
                     <div class="lsb-ai-model-list" id="lsb-ai-model-list-box"></div>
@@ -2623,7 +2607,7 @@
                 </div>
                 <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-model-fetch" title="从当前 Base URL / Key 拉取可用模型列表">拉取</button>
               </div>
-              <span class="lsb-ai-hint">点「拉取」获取模型列表 → 点 ▾ 展开：顶部可筛选、「🔌测当前」测输入框模型、「🩺体检全部」批量测；hover 条目点 ⚡ 单测该条；点条目即选中。模型框本身可手动输入</span>
+              <span class="lsb-ai-hint">点「拉取」获取模型列表 → 点 ▾ 展开：顶部可筛选、「🩺体检全部」批量测；hover 条目点 ⚡ 单测该条；点条目即选中。模型框本身可手动输入</span>
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">请求格式</label>
@@ -2875,8 +2859,6 @@
 
     // 模型列表：拉取按钮 + 载入时用激活预设缓存回填
     document.getElementById('lsb-ai-model-fetch').addEventListener('click', fetchModels);
-    const testCurBtn = document.getElementById('lsb-ai-model-test-cur');
-    if (testCurBtn) testCurBtn.addEventListener('click', testConnection);
     const testAllBtn = document.getElementById('lsb-ai-model-test-all');
     if (testAllBtn) testAllBtn.addEventListener('click', () => runModelHealthCheck(true));
     populateModelListFromActiveProfile();
