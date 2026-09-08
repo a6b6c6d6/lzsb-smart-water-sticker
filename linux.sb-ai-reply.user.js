@@ -757,6 +757,33 @@
     if (list && list.length) populateModelList(list);
   }
 
+  // 连通性测试：用当前表单配置真发一个最小请求（非流式、短超时），验证 Base URL/Key/模型/格式可用性。
+  // 公益/免费模型经常失效，模型列表拉得到 ≠ 能出内容，真发请求最靠谱。
+  function testConnection() {
+    const cfg = readConfigFromUI();
+    const err = validateConfig(cfg);
+    if (err) { setStatus(err, 'error'); document.getElementById('lsb-ai-settings').open = true; return; }
+    const btn = document.getElementById('lsb-ai-test');
+    const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '🔌 测试'; } };
+    if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
+    // 复用真实请求构造（headers/body 与实际生成一致，测的就是实际生效的配置）
+    const req = buildRequest(cfg, { system: '只回复一个词：pong', userContent: 'ping', images: undefined, tools: undefined });
+    req.timeout = 20000; // 测试等不了 180s 生成超时
+    setStatus('正在测试连接（发送 ping…）', 'loading');
+    appendLog('🔌 连接测试：' + (req.url || '') + ' | model=' + ((req.body && req.body.model) || '?'), 'info');
+    sendRequestOnce(req).then((r) => {
+      restoreBtn();
+      const reply = String((r && r.text) || '').trim().slice(0, 150);
+      appendLog(reply ? ('✅ 连接正常，模型回应：' + reply) : '✅ 连接与 Key 正常（模型未返回正文——多为思考型模型把短配额吃完，不影响可用性判断）', 'done');
+      setStatus(reply ? ('✅ 连接正常，模型回应：' + reply) : '✅ 连接与 Key 正常（模型未返回正文，多为思考型，可用性判定为通过）', 'ok');
+    }).catch((e) => {
+      restoreBtn();
+      const msg = (e && e.message) ? e.message : '未知错误';
+      appendLog('❌ 连接测试失败：' + msg, 'warn');
+      setStatus('❌ 测试失败：' + msg, 'error');
+    });
+  }
+
   // 从当前 baseUrl/key 拉取模型列表（GET /models），填进下拉，并缓存到匹配的预设
   function fetchModels() {
     const $ = (id) => document.getElementById('lsb-ai-cfg-' + id);
@@ -2479,6 +2506,7 @@
                   </div>
                 </div>
                 <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-model-fetch" title="从当前 Base URL / Key 拉取可用模型列表">拉取</button>
+                <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-test" title="用当前配置真发一个请求测试连通性（公益/免费模型易失效，测试最靠谱）">🔌 测试</button>
               </div>
               <span class="lsb-ai-hint">点「拉取」获取模型列表 → 点右侧 ▾ 展开、上方小框筛选、点一条即选中；模型框本身仍可手动输入</span>
             </div>
@@ -2732,6 +2760,8 @@
 
     // 模型列表：拉取按钮 + 载入时用激活预设缓存回填
     document.getElementById('lsb-ai-model-fetch').addEventListener('click', fetchModels);
+    const testBtn = document.getElementById('lsb-ai-test');
+    if (testBtn) testBtn.addEventListener('click', testConnection);
     populateModelListFromActiveProfile();
 
     // 模型自定义筛选下拉：▾ 展开 / 独立筛选框 / 点条目选中（筛选框与主输入框功能不重合）
