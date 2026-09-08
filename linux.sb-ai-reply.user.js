@@ -265,6 +265,12 @@
     .lsb-ai-btn-secondary:hover:not(:disabled) { background: #e5e7eb; }
     .lsb-ai-btn-row { display: flex; gap: 8px; }
     .lsb-ai-btn-row .lsb-ai-btn { flex: 1; }
+    /* 生成/停止按钮行 */
+    .lsb-ai-gen-row { display: flex; gap: 8px; }
+    .lsb-ai-gen-row .lsb-ai-btn { flex: 1; }
+    .lsb-ai-btn-stop { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
+    .lsb-ai-btn-stop:hover:not(:disabled) { background: #fecaca; }
+    .lsb-hidden { display: none !important; }
 
     .lsb-ai-status { font-size: 12px; min-height: 16px; line-height: 1.4; word-break: break-all; }
     .lsb-ai-status.lsb-info { color: #6b7280; }
@@ -1687,7 +1693,7 @@
   function fetchPageText(url, timeoutSec) {
     const t = timeoutSec || 12;
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      trackXhr(GM_xmlhttpRequest({
         method: 'GET',
         url: url,
         timeout: t * 1000,
@@ -1716,8 +1722,8 @@
         },
         onerror: () => reject(new Error('网络错误')),
         ontimeout: () => reject(new Error('超时(' + t + 's)')),
-        onabort: () => reject(new Error('请求中止'))
-      });
+        onabort: () => reject(stopRequested ? abortError() : new Error('请求中止'))
+      }));
     });
   }
 
@@ -1729,7 +1735,7 @@
     const topK = (Number(cfg.searchTopK) >= 1 ? Math.floor(Number(cfg.searchTopK)) : 6);
     const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 30); // 搜索是快请求，封顶 30s
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      trackXhr(GM_xmlhttpRequest({
         method: 'GET',
         url: engine.buildUrl(query),
         timeout: timeoutSec * 1000,
@@ -1750,8 +1756,9 @@
           resolve({ text: text, items: items, searched: true });
         },
         onerror: () => reject(new Error('搜索网络错误')),
-        ontimeout: () => reject(new Error('搜索超时（' + timeoutSec + 's）'))
-      });
+        ontimeout: () => reject(new Error('搜索超时（' + timeoutSec + 's）')),
+        onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消'))
+      }));
     });
   }
 
@@ -1800,6 +1807,33 @@
   // 可重试的失败状态码：上游临时不可用 / 限流类（401/403/400 等不重试）
   const RETRIABLE_STATUS = [408, 429, 500, 502, 503, 504, 529];
 
+  /* ===== 手动停止：标志 + 停止信号（await 可被立即打断）+ 在途流式请求 abort ===== */
+  let stopRequested = false;
+  let stopSignal = null; // { p, resolve }：生成期间创建，stop 时 resolve，使 stopRace 立即抛 abortError
+  function resetStop() { stopRequested = false; stopSignal = null; }
+  function requestStop() {
+    stopRequested = true;
+    if (stopSignal) stopSignal.resolve();
+    if (activeXhrs) { activeXhrs.forEach((x) => { try { x.abort(); } catch (e) { /* 忽略 */ } }); activeXhrs.clear(); }
+  }
+  function abortError() { const e = new Error('已手动停止'); e.aborted = true; return e; }
+  function getStopSignal() {
+    if (!stopSignal) {
+      let resolveFn = null;
+      const p = new Promise((r) => { resolveFn = r; });
+      stopSignal = { p: p, resolve: resolveFn };
+    }
+    return stopSignal.p;
+  }
+  // 让任意 Promise 可被停止打断：停止后立即抛 abortError（在途请求自然结束/由调用方 abort，流程不等待）
+  function stopRace(workP) {
+    return Promise.race([workP, getStopSignal().then(() => { throw abortError(); })]);
+  }
+  // 流程关键点检查：被停止时立刻抛出（各层 catch 识别 e.aborted 正常收尾，不当作错误）
+  function checkStop() { if (stopRequested) throw abortError(); }
+  const activeXhrs = new Set();
+  function trackXhr(x) { if (x && typeof x.abort === 'function') activeXhrs.add(x); return x; }
+
   // 生成请求参数摘要（不含 apiKey），拼进 4xx 报错，方便定位「源站拒绝参数」类问题（如模型名不匹配/字段不被支持）
   function describeRequest(req) {
     const b = (req && req.body) ? req.body : {};
@@ -1821,7 +1855,7 @@
   function sendRequestOnce(req) {
     const timeoutMs = req.timeout || 180000;
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      trackXhr(GM_xmlhttpRequest({
         method: 'POST',
         url: req.url,
         timeout: timeoutMs,
@@ -1862,8 +1896,8 @@
         },
         onerror: () => { const e = new Error('网络错误，请求未能完成，请检查网络或 Base URL'); e.retriable = true; reject(e); },
         ontimeout: () => { const e = new Error('请求超时（超过 ' + Math.round(timeoutMs / 1000) + ' 秒），请稍后重试'); e.retriable = true; reject(e); },
-        onabort: () => reject(new Error('请求已取消')) // 用户取消不重试
-      });
+        onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消')) // 用户取消不重试
+      }));
     });
   }
 
@@ -1938,7 +1972,7 @@
           if (d) { full += d; try { onToken(d); } catch (_) { /* 忽略回调异常 */ } }
         });
       };
-      GM_xmlhttpRequest({
+      trackXhr(GM_xmlhttpRequest({
         method: 'POST',
         url: req.url,
         timeout: timeoutMs,
@@ -1982,8 +2016,8 @@
         },
         onerror: () => { const e = new Error('网络错误，请求未能完成，请检查网络或 Base URL'); e.retriable = true; reject(e); },
         ontimeout: () => { const e = new Error('请求超时（超过 ' + Math.round(timeoutMs / 1000) + ' 秒），请稍后重试'); e.retriable = true; reject(e); },
-        onabort: () => reject(new Error('请求已取消'))
-      });
+        onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消'))
+      }));
     });
   }
 
@@ -2076,7 +2110,8 @@
       images: undefined,
       tools: undefined
     });
-    const planRes = await sendRequest(planReq, (n, max, e, wait) => progress('规划请求失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn'));
+    const planRes = await stopRace(sendRequest(planReq, (n, max, e, wait) => progress('规划请求失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn')));
+    checkStop();
     const pairs = parsePairs(planRes.text);
 
     if (!pairs.length) {
@@ -2127,9 +2162,10 @@
             tools: searchTools(cfg)
           }), () => progress('部分搜索超时/失败，正在自动重试…', 'warn')));
       // 客户端直搜 resolve {text,items}、API 子请求 resolve {text,searched}，统一成对象；单条失败降级为占位文本，不拖垮整批
-      const ress = await Promise.all(tasks.map((p) => p
+      const ress = await stopRace(Promise.all(tasks.map((p) => p
         .then((v) => (typeof v === 'string' ? { text: v, searched: true } : v))
-        .catch((e) => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
+        .catch((e) => { if (e && e.aborted) throw e; return { text: '(搜索失败：' + (e.message || e) + ')', searched: false }; }))));
+      checkStop();
       // 批内逐词不单独刷行（太碎）：收集后整批打一行折叠汇总，点开看本批每词结果
       const batchTip = [];
       let okCount = 0;
@@ -2165,7 +2201,8 @@
     if (deepFallbackK > 0 && candRows.length > 0 && cfg.searchEngine !== 'api') {
       const deepLog = (m, tip) => appendLog(m, 'deep', tip); // 深抓相关日志走青色，不占用单行状态
       deepLog('  🧠 AI 从 ' + candRows.length + ' 条候选中挑选值得深抓的…');
-      const picked = await pickGlobal(cfg, candRows, searchItems.length);
+      const picked = await stopRace(pickGlobal(cfg, candRows, searchItems.length));
+      checkStop();
       let targets;
       if (!picked) {
         // 挑选重试穷尽仍失败 → 回退每词前 K 条（保持「searchDeepK = 每词兜底深抓条数」的语义）
@@ -2184,14 +2221,17 @@
       candRows.forEach((c) => { byKey[c.key] = c; });
       const steps = []; // { key, title, url, ok, skip, info, text }
       for (const key of targets) {
+        checkStop(); // 被停止则立即退出深抓
         const c = byKey[key];
         if (!c) continue;
         if (isSameSite(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true }); continue; }
         try {
-          const txt = await fetchPageText(c.url, 12);
+          const txt = await stopRace(fetchPageText(c.url, 12));
+          checkStop();
           deepMap[key] = txt;
           steps.push({ key: key, title: c.title, url: c.url, ok: true, text: txt });
         } catch (e) {
+          if (e && e.aborted) throw e;
           steps.push({ key: key, title: c.title, url: c.url, ok: false, info: (e && e.message) || '失败' });
         }
       }
@@ -2229,7 +2269,8 @@
       : rawSearchBlock;
     const finalContent = finalUserContent + '\n\n【注意】若下面的搜索结果中出现了与帖子原文名称不一致的正确写法（如产品名、会员名、品牌名等），请结合帖子整体上下文判断作者真正想表达的，并在回帖中使用正确写法，不要照搬帖子里的明显拼写错误。\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + clippedSearch;
     const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
-    const r = await streamFinal(req);
+    const r = await stopRace(streamFinal(req));
+    checkStop();
     return { text: r.text, searched: true };
   }
 
@@ -2564,6 +2605,8 @@
       updateGenerateBtnText(); // 恢复为动态文案（有目标/无目标）
     }
     if (fab) fab.disabled = on;
+    const stopBtn = document.getElementById('lsb-ai-stop');
+    if (stopBtn) stopBtn.classList.toggle('lsb-hidden', !on); // 生成/搜索期间显示「⏹ 停止」
     if (on) setStatus('正在调用 AI 生成回复，可能耗时较长，请勿关闭页面…', 'loading');
   }
 
@@ -2942,7 +2985,10 @@
           <span id="lsb-ai-target-text">尚未选择目标评论，点任意评论旁的「水它」按钮</span>
           <button type="button" class="lsb-target-clear" id="lsb-ai-target-clear" style="display:none">取消</button>
         </div>
-        <button type="button" class="lsb-ai-btn lsb-ai-btn-primary" id="lsb-ai-generate">抓取并生成回复</button>
+        <div class="lsb-ai-row lsb-ai-gen-row">
+          <button type="button" class="lsb-ai-btn lsb-ai-btn-primary" id="lsb-ai-generate">抓取并生成回复</button>
+          <button type="button" class="lsb-ai-btn lsb-ai-btn-stop lsb-hidden" id="lsb-ai-stop" title="停止当前的生成 / 搜索流程">⏹ 停止</button>
+        </div>
 
         <div class="lsb-ai-row lsb-ai-persona-row">
           <label class="lsb-ai-label">语气 / 提示词（默认通用；选其他仅对本次生成生效，生成后自动恢复默认）</label>
@@ -3173,6 +3219,8 @@
     panel.querySelector('.lsb-ai-close').addEventListener('click', () => hidePanel());
 
     generateBtn.addEventListener('click', onGenerate);
+    const stopBtn = document.getElementById('lsb-ai-stop');
+    if (stopBtn) stopBtn.addEventListener('click', requestStop);
     document.getElementById('lsb-ai-target-clear').addEventListener('click', clearTarget);
     document.getElementById('lsb-ai-fill').addEventListener('click', onFill);
     document.getElementById('lsb-ai-mode-switch').addEventListener('click', (e) => {
@@ -3465,6 +3513,7 @@
       setStatus('提示：内容超过 ' + cfg.maxContextChars + ' 字符，已截断后生成。', 'info');
     }
 
+    resetStop();
     setGenerating(true);
     previewEl.classList.remove('lsb-success');
     previewEl.value = '';
@@ -3495,8 +3544,13 @@
       appendLog('✅ 生成完成', 'done');
       setStatus('生成成功' + toneNote + imgNote + searchNote + '，可手动修改后点击「填入编辑器」', 'ok');
     } catch (e) {
-      appendLog('❌ ' + (e.message || '生成失败'), 'warn');
-      setStatus(e.message || '生成失败', 'error');
+      if (e && e.aborted) {
+        appendLog('⏹ 已停止生成（未完成内容不会填入）', 'warn');
+        setStatus('已停止生成', 'info');
+      } else {
+        appendLog('❌ ' + (e.message || '生成失败'), 'warn');
+        setStatus(e.message || '生成失败', 'error');
+      }
     } finally {
       setGenerating(false);
       resetSelectedPrompt(); // 语气一次性，用完恢复默认
@@ -3526,6 +3580,7 @@
       setStatus('提示：内容超过 ' + cfg.maxContextChars + ' 字符，已截断后生成。', 'info');
     }
 
+    resetStop();
     setGenerating(true);
     previewEl.classList.remove('lsb-success');
     previewEl.value = '';
@@ -3562,8 +3617,13 @@
       appendLog('✅ 生成完成', 'done');
       setStatus('回应生成成功' + toneNote + note + searchNote + '，可修改后点「填入编辑器」', 'ok');
     } catch (e) {
-      appendLog('❌ ' + (e.message || '生成失败'), 'warn');
-      setStatus(e.message || '生成失败', 'error');
+      if (e && e.aborted) {
+        appendLog('⏹ 已停止生成（未完成内容不会填入）', 'warn');
+        setStatus('已停止生成', 'info');
+      } else {
+        appendLog('❌ ' + (e.message || '生成失败'), 'warn');
+        setStatus(e.message || '生成失败', 'error');
+      }
     } finally {
       setGenerating(false);
       resetSelectedPrompt(); // 语气一次性，用完恢复默认
