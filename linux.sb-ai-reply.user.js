@@ -362,6 +362,9 @@
     .lsb-ai-deep-item-body { display: none; padding: 8px 10px; border-top: 1px solid #e2e8f0; }
     .lsb-ai-deep-item.open .lsb-ai-deep-item-body { display: block; }
     .lsb-ai-deep-item-body .lsb-ai-deep-link { display: block; margin-bottom: 6px; font-size: 12px; }
+    /* 批量搜索结果按词分节的小节标题（详情弹窗内） */
+    .lsb-ai-batch-word { font-size: 12px; font-weight: 700; color: #1e40af; margin: 8px 0 4px; padding-bottom: 3px; border-bottom: 1px dashed #bfdbfe; }
+    .lsb-ai-batch-word:first-child { margin-top: 0; }
 
     .lsb-ai-preview {
       min-height: 110px;
@@ -2083,12 +2086,14 @@
       return streamFinal(req);
     }
 
-    // 把提炼出的关键词逐条打进过程窗，方便用户「视奸」搜了啥
-    progress('提炼出 ' + pairs.length + ' 组关键词：', 'kw');
-    pairs.forEach((p, i) => {
-      const fb = (p.fallback && p.fallback !== p.kw) ? ('  ↩泛化：' + p.fallback) : '';
-      progress('  ' + (i + 1) + '. ' + p.kw + fb, 'kw');
-    });
+    // 把提炼出的关键词收成一条（点开看清单），避免逐行刷屏
+    {
+      const listTip = pairs.map((p, i) => {
+        const fb = (p.fallback && p.fallback !== p.kw) ? (' ↩泛化：' + p.fallback) : '';
+        return (i + 1) + '. ' + p.kw + fb;
+      }).join('\n');
+      progress('🧠 提炼出 ' + pairs.length + ' 组关键词（点开看清单）', 'kw', listTip);
+    }
 
     // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，各自独立成一个搜索项）
     // 本阶段只做浅搜并把条目攒进全局候选池；深抓推迟到全部词搜完，由 AI 一次性跨词挑选（见下方「全局深抓」）
@@ -2120,10 +2125,14 @@
       const ress = await Promise.all(tasks.map((p) => p
         .then((v) => (typeof v === 'string' ? { text: v, searched: true } : v))
         .catch((e) => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
+      // 批内逐词不单独刷行（太碎）：收集后整批打一行折叠汇总，点开看本批每词结果
+      const batchTip = [];
+      let okCount = 0;
+      let failCount = 0;
       ress.forEach((r, idx) => {
         const ok = r.searched !== false && !/^\(搜索失败/.test(r.text);
-        // 成功：tip 挂搜索结果正文；失败：tip 挂失败原因（反爬/超时/HTTP 状态），hover/点击固定可诊断
-        progress('  ✓ ' + batch[idx].label + '：' + (ok ? (r.text.length + ' 字') : '失败/无结果'), ok ? 'done' : 'warn', r.text || undefined);
+        if (ok) okCount += 1; else failCount += 1;
+        batchTip.push('【关键词：' + batch[idx].label + '】\n' + r.text);
         const wordIdx = i + idx; // 词下标 = searchItems 数组下标（批内顺序与 batch 一一对应）
         const keys = [];
         const items = Array.isArray(r.items) ? r.items : []; // api 源/失败项无结构化条目 → 不进候选池
@@ -2134,6 +2143,9 @@
         });
         rows.push({ label: batch[idx].label, text: r.text, keys: keys });
       });
+      // 批汇总行（点开看该批全部词的结果/失败原因）
+      const batchOk = failCount === 0;
+      progress('  📦 第 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批完成：成功 ' + okCount + (failCount ? (' · 失败 ' + failCount) : '') + '（点开看本批结果）', batchOk ? 'done' : 'warn', batchTip.join('\n\n'));
     }
 
     // 全局深抓：收齐全部词的候选后，一次 AI 调用跨词挑选值得看正文的条目 → 逐条深抓 → 按 key 回填。
@@ -2285,11 +2297,42 @@
     if (text.indexOf('[页面正文') >= 0 || text.indexOf('深抓明细') >= 0) {
       return renderDeepDetail(text);
     }
+    // 批量结果（多段【关键词：…】+ 各词数字条目列表）→ 按词分节：每词一个标题 + 词内结果卡片
+    if (text.indexOf('【关键词：') >= 0 && /\n链接：/.test(text)) {
+      return renderBatchDetail(text);
+    }
     if (/(^|\n)\s*\d+\.\s+\S/.test(text) && /\n\s*链接：/.test(text)) {
       return renderSearchDetail(text);
     }
     const wrap = document.createElement('div');
     return appendTextWithLinks(wrap, text);
+  }
+
+  // 批量搜索结果分节渲染：按「【关键词：X】」切段，每词一个小节标题 + renderSearchDetail 结果卡片
+  function renderBatchDetail(text) {
+    const wrap = document.createElement('div');
+    const lines = text.split('\n');
+    let curWord = null;
+    let curLines = [];
+    const flushWord = () => {
+      if (curWord === null) return;
+      const head = document.createElement('div');
+      head.className = 'lsb-ai-batch-word';
+      head.textContent = curWord;
+      wrap.appendChild(head);
+      const sub = curLines.join('\n').trim();
+      if (sub) wrap.appendChild(renderSearchDetail(sub));
+      curWord = null; curLines = [];
+    };
+    for (const ln of lines) {
+      const m = ln.match(/^【关键词：(.+?)】$/);
+      if (m) { flushWord(); curWord = m[1].trim(); continue; }
+      if (curWord !== null) curLines.push(ln);
+      else if (ln.trim()) curLines.push(ln);
+    }
+    flushWord();
+    if (!wrap.childNodes.length) { appendTextWithLinks(wrap, text); }
+    return wrap;
   }
 
   // 纯文本 + URL 链接化（http/https），复制走的仍是原始纯文本
