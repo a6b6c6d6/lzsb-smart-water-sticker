@@ -389,13 +389,14 @@
       cursor: pointer;
       font-size: 13px;
       color: #1f2937;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      display: flex; align-items: center; justify-content: space-between; gap: 6px;
     }
+    .lsb-ai-model-item > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .lsb-ai-model-item:hover { background: #f3f4f6; }
     .lsb-ai-model-item.is-active { background: #eff6ff; color: #2563eb; font-weight: 600; }
     .lsb-ai-model-empty { padding: 8px; font-size: 12px; color: #9ca3af; text-align: center; }
-    /* 模型存活体检徽标 */
-    .lsb-ai-model-state { font-size: 11px; margin-left: 6px; }
+    /* 模型存活体检徽标：nowrap 固定右侧，不被模型名挤出 */
+    .lsb-ai-model-state { font-size: 11px; margin-left: 6px; white-space: nowrap; flex: 0 0 auto; max-width: 46%; overflow: hidden; text-overflow: ellipsis; }
     .lsb-ai-model-state.st-ok { color: #059669; }
     .lsb-ai-model-state.st-bad { color: #dc2626; }
     .lsb-ai-model-state.st-test { color: #d97706; }
@@ -780,16 +781,18 @@
       item.className = 'lsb-ai-model-item' + (m === cur ? ' is-active' : '');
       const label = document.createElement('span');
       label.textContent = m;
+      label.title = m; // 模型名过长省略时 hover 看全名
       item.appendChild(label);
       // 存活状态徽标：✅可用 / ❌失效(原因) / ⏳测试中；未测过不显示
       const st = modelState[m];
       if (st) {
         const badge = document.createElement('span');
         badge.className = 'lsb-ai-model-state st-' + st.t;
-        badge.textContent = st.t === 'test' ? ' ⏳测试中'
-          : (st.t === 'ok' ? ' ✅' : ' ❌' + (st.info ? ' ' + st.info : ''));
+        badge.textContent = st.t === 'test' ? '⏳测试中'
+          : (st.t === 'ok' ? '✅可用' : '❌' + (st.info ? ' ' + st.info : '失效'));
+        if (st.t === 'bad' && st.info) badge.title = '失效原因：' + st.info;
+        else if (st.t === 'ok') badge.title = '可用';
         item.appendChild(badge);
-        if (st.t === 'bad' && st.info) item.title = '失效原因：' + st.info;
       }
       item.dataset.model = m;
       box.appendChild(item);
