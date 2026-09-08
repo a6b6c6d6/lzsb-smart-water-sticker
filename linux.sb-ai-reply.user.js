@@ -368,7 +368,7 @@
     }
     .lsb-ai-model-caret:hover, .lsb-ai-model-dd.open .lsb-ai-model-caret { color: #2563eb; }
     .lsb-ai-model-caret:hover { background: #f3f4f6; }
-    #lsb-ai-model-fetch { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
+    #lsb-ai-model-fetch, #lsb-ai-test { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
     .lsb-ai-model-menu {
       display: none;
       position: absolute;
