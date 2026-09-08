@@ -394,6 +394,11 @@
     .lsb-ai-model-item:hover { background: #f3f4f6; }
     .lsb-ai-model-item.is-active { background: #eff6ff; color: #2563eb; font-weight: 600; }
     .lsb-ai-model-empty { padding: 8px; font-size: 12px; color: #9ca3af; text-align: center; }
+    /* 模型存活体检徽标 */
+    .lsb-ai-model-state { font-size: 11px; margin-left: 6px; }
+    .lsb-ai-model-state.st-ok { color: #059669; }
+    .lsb-ai-model-state.st-bad { color: #dc2626; }
+    .lsb-ai-model-state.st-test { color: #d97706; }
 
     /* 语气 / 提示词选择行 */
     .lsb-ai-persona-line { display: flex; gap: 6px; align-items: stretch; }
@@ -701,6 +706,52 @@
   // 已拉取的模型 id 列表（内存），供自定义筛选下拉渲染
   let modelOptions = [];
 
+  // 模型存活体检状态：modelState[m] = { t:'ok'|'bad'|'test', info:'' }，testTs[m] = 最近检测时间戳
+  const modelState = {};
+  const modelTestTs = {};
+  let modelHealthBusy = false;
+  const shortErr = (msg) => {
+    const s = String(msg || '');
+    const m = s.match(/HTTP\s*\d+|网络错误|请求超时|超时|额度|Key|401|403|404|429|400|模型.*(?:不存在|未找到)|not found|invalid/i);
+    if (m) return m[0];
+    return s.slice(0, 24);
+  };
+  // 对单个模型发 ping（复用真实请求构造），resolve { ok, info }
+  function pingOneModel(model) {
+    const cfg = Object.assign({}, readConfigFromUI(), { model: model });
+    const req = buildRequest(cfg, { system: '只回复一个词：pong', userContent: 'ping', images: undefined, tools: undefined });
+    req.timeout = 15000;
+    return sendRequestOnce(req)
+      .then((r) => {
+        const reply = String((r && r.text) || '').trim().slice(0, 40);
+        // 2xx 即判定可用；思考型模型可能空正文，不误报
+        return { ok: true, info: reply || '可用（思考型空正文）' };
+      })
+      .catch((e) => ({ ok: false, info: shortErr(e && e.message) || '不可用' }));
+  }
+  // 打开模型下拉时对列表逐个体检（串行防限流；120 秒缓存内不重测已测模型）
+  async function runModelHealthCheck() {
+    if (modelHealthBusy || !modelOptions.length) return;
+    const now = Date.now();
+    const pending = modelOptions.filter((m) => {
+      const ts = modelTestTs[m];
+      return !(ts && (now - ts) < 120000 && (modelState[m] && modelState[m].t !== 'test'));
+    });
+    if (!pending.length) return;
+    modelHealthBusy = true;
+    const filterEl = document.getElementById('lsb-ai-model-filter');
+    for (const m of pending) {
+      modelState[m] = { t: 'test', info: '' };
+      renderModelMenu(filterEl ? filterEl.value : '');
+      const r = await pingOneModel(m);
+      modelState[m] = { t: r.ok ? 'ok' : 'bad', info: r.ok ? '' : r.info };
+      modelTestTs[m] = Date.now();
+      renderModelMenu(filterEl ? filterEl.value : '');
+      if (!r.ok) await new Promise((res) => setTimeout(res, 200)); // 失败稍歇，防连发触发限流
+    }
+    modelHealthBusy = false;
+  }
+
   // 按筛选词渲染模型下拉菜单条目（筛选框与主输入框独立，互不干扰）
   function renderModelMenu(filterText) {
     const box = document.getElementById('lsb-ai-model-list-box');
@@ -727,7 +778,19 @@
     list.forEach((m) => {
       const item = document.createElement('div');
       item.className = 'lsb-ai-model-item' + (m === cur ? ' is-active' : '');
-      item.textContent = m;
+      const label = document.createElement('span');
+      label.textContent = m;
+      item.appendChild(label);
+      // 存活状态徽标：✅可用 / ❌失效(原因) / ⏳测试中；未测过不显示
+      const st = modelState[m];
+      if (st) {
+        const badge = document.createElement('span');
+        badge.className = 'lsb-ai-model-state st-' + st.t;
+        badge.textContent = st.t === 'test' ? ' ⏳测试中'
+          : (st.t === 'ok' ? ' ✅' : ' ❌' + (st.info ? ' ' + st.info : ''));
+        item.appendChild(badge);
+        if (st.t === 'bad' && st.info) item.title = '失效原因：' + st.info;
+      }
       item.dataset.model = m;
       box.appendChild(item);
     });
@@ -821,6 +884,9 @@
         if (!ids.length) { setStatus('该中转站未返回模型列表（/models 为空或格式不支持），仍可手动输入', 'error'); return; }
         ids = Array.from(new Set(ids)).sort();
         populateModelList(ids);
+        // 新列表 = 重新体检：清掉旧模型存活状态缓存
+        for (const k of Object.keys(modelState)) delete modelState[k];
+        for (const k of Object.keys(modelTestTs)) delete modelTestTs[k];
         // 无条件写入「按 baseUrl」的独立缓存：即使当前配置没匹配到任何预设，刷新/切回该站后也能恢复
         setModelBaseCache(baseUrl, ids);
         // 同步到匹配的预设（索引指向的预设必须与当前表单 baseUrl 同站，避免手动改地址后写错对象）
@@ -2774,6 +2840,7 @@
       renderModelMenu('');
       modelDd.classList.add('open');
       if (modelFilter) setTimeout(() => modelFilter.focus(), 0);
+      runModelHealthCheck(); // 打开即体检：逐模型标 ✅/❌/⏳（120s 缓存内不重测）
     };
     const closeModelMenu = () => modelDd.classList.remove('open');
     document.getElementById('lsb-ai-model-caret').addEventListener('click', (e) => {
