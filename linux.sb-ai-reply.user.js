@@ -1495,12 +1495,14 @@
   }
 
   // 执行一次客户端直搜，resolve 出喂给模型的纯文本；失败 reject，由阶段3分批容错兜住（单条失败不拖垮整批）
-  // onStep 可选：深抓阶段的进度消息（进视奸窗，不影响结果文本）
-  function clientWebSearch(cfg, query, onStep) {
+  // onStep 可选：深抓阶段的进度消息（进视奸窗，不影响结果文本）；deepKOverride=0 时本词跳过深抓（浅查）
+  function clientWebSearch(cfg, query, onStep, deepKOverride) {
     const engineName = CLIENT_SEARCH_ENGINES[cfg.searchEngine] ? cfg.searchEngine : 'bing';
     const engine = CLIENT_SEARCH_ENGINES[engineName];
     const topK = (Number(cfg.searchTopK) >= 1 ? Math.floor(Number(cfg.searchTopK)) : 6);
-    const deepK = Math.min(Math.max(Number(cfg.searchDeepK) >= 0 ? Math.floor(Number(cfg.searchDeepK)) : 2, 0), topK);
+    const deepK = (deepKOverride === 0)
+      ? 0
+      : Math.min(Math.max(Number(cfg.searchDeepK) >= 0 ? Math.floor(Number(cfg.searchDeepK)) : 2, 0), topK);
     const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 30); // 搜索是快请求，封顶 30s
     const step = (m, tip) => { if (typeof onStep === 'function') { try { onStep(m, tip); } catch (e) { /* 忽略 */ } } };
     return new Promise((resolve, reject) => {
@@ -1826,9 +1828,9 @@
         if (x && typeof x === 'object') {
           const kw = String(x.kw || x.q || '').trim();
           const fb = String(x.fallback || x.g || kw).trim();
-          if (kw) pairs.push({ kw: kw, fallback: fb || kw });
+          if (kw) pairs.push({ kw: kw, fallback: fb || kw, deep: x.deep !== false }); // 未标 deep 默认深抓（保守保质量）
         } else if (typeof x === 'string' && x.trim()) {
-          pairs.push({ kw: x.trim(), fallback: x.trim() });
+          pairs.push({ kw: x.trim(), fallback: x.trim(), deep: true });
         }
       }
       return pairs.length ? pairs : null;
@@ -1866,7 +1868,7 @@
     progress('正在分析帖子、提炼搜索关键词…');
     const planReq = buildRequest(cfg, {
       system: '你是一个搜索规划助手。你的任务是分析论坛内容，提炼用于联网搜索的关键词。',
-      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 数组，每个元素是一个对象，包含两个字段：「kw」是精准搜索词，「fallback」是更泛化的搜索词（用品牌、品类、价格等通用表述，去掉可能不准确或罕见的专有名词）。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接，请把链接指向的项目名/产品名/页面主题也纳入搜索词。\n\n论坛内容：\n' + rawText,
+      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 数组，每个元素是一个对象，包含三个字段：「kw」是精准搜索词；「fallback」是更泛化的搜索词（用品牌、品类、价格等通用表述，去掉可能不准确或罕见的专有名词）；「deep」是布尔值——true 表示该主题需要引用详细事实、背景、具体过程或数据（如人物经历、产品参数、教程步骤、事件来龙去脉），后续会对结果做网页正文深抓；false 表示只需简单确认/了解（如名词释义、日期、是否存在的快速核对），后续只用搜索摘要即可。请把 deep:true 的条目排在数组前面、deep:false 的排在后面。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接，请把链接指向的项目名/产品名/页面主题也纳入搜索词。\n\n论坛内容：\n' + rawText,
       images: undefined,
       tools: undefined
     });
@@ -1884,16 +1886,18 @@
     progress('提炼出 ' + pairs.length + ' 组关键词：', 'kw');
     pairs.forEach((p, i) => {
       const fb = (p.fallback && p.fallback !== p.kw) ? ('  ↩泛化：' + p.fallback) : '';
-      progress('  ' + (i + 1) + '. ' + p.kw + fb, 'kw');
+      const deepTag = p.deep === false ? '（浅查）' : '';
+      progress('  ' + (i + 1) + '. ' + p.kw + fb + deepTag, 'kw');
     });
 
     // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，结果合并）
     const BATCH = (Number(cfg.searchBatch) >= 1 ? Math.floor(Number(cfg.searchBatch)) : 3);
     const searchItems = [];
     for (const p of pairs) {
-      searchItems.push({ label: p.kw, query: p.kw });
+      const dp = p.deep === false ? 0 : undefined; // 浅查词不深抓，只取摘要
+      searchItems.push({ label: p.kw, query: p.kw, deepK: dp });
       if (p.fallback && p.fallback !== p.kw) {
-        searchItems.push({ label: p.kw + '（泛化）', query: p.fallback });
+        searchItems.push({ label: p.kw + '（泛化）', query: p.fallback, deepK: dp });
       }
     }
     const totalBatches = Math.ceil(searchItems.length / BATCH);
@@ -1904,7 +1908,7 @@
       // bing/ddg：脚本用 GM_xmlhttpRequest 直连搜索引擎自己抓（免Key、不依赖中转站）；api：沿用中转站内置 web_search 子请求
       const useClientSearch = cfg.searchEngine !== 'api';
       const tasks = batch.map((item) => useClientSearch
-        ? clientWebSearch(cfg, item.query, (m, tip) => appendLog(m, 'kw', tip)) // 深抓进度直进视奸窗（紫），tip 挂正文/原因
+        ? clientWebSearch(cfg, item.query, (m, tip) => appendLog(m, 'kw', tip), item.deepK) // 深抓进度直进视奸窗（紫）；浅查词 deepK=0 跳过深抓
         : sendRequest(buildRequest(cfg, {
             system: '你是一个联网搜索助手。请对用户给出的关键词执行联网搜索，并把搜索结果的内容整理出来。',
             userContent: item.query,
