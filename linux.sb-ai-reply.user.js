@@ -292,6 +292,18 @@
     .lsb-ai-log-line.lsb-kw { color: #7c3aed; }
     .lsb-ai-log-line.lsb-warn { color: #d97706; }
     .lsb-ai-log-line.lsb-done { color: #059669; }
+    /* 视奸窗 hover 悬浮详情：搜索结果内容浮层（body 级，避免被滚动容器裁剪） */
+    .lsb-ai-log-line[data-tip] { cursor: help; border-bottom: 1px dotted rgba(37, 99, 235, .35); }
+    .lsb-ai-log-tip {
+      position: fixed; z-index: 2147483000; display: none;
+      max-width: 480px; max-height: 280px; overflow: auto;
+      background: #ffffff; color: #1e293b;
+      border: 1px solid #cbd5e1; border-radius: 8px;
+      box-shadow: 0 6px 20px rgba(15, 23, 42, .18);
+      padding: 8px 10px; font-size: 12px; line-height: 1.6;
+      white-space: pre-wrap; word-break: break-all;
+      pointer-events: none;
+    }
 
     .lsb-ai-preview {
       min-height: 110px;
@@ -1827,7 +1839,8 @@
         .catch((e) => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
       ress.forEach((r, idx) => {
         const ok = r.searched !== false && !/^\(搜索失败/.test(r.text);
-        progress('  ✓ ' + batch[idx].label + '：' + (ok ? (r.text.length + ' 字') : '失败/无结果'), ok ? 'done' : 'warn');
+        // 成功时把搜索结果正文作为 tip 挂在行上，鼠标停住可看内容
+        progress('  ✓ ' + batch[idx].label + '：' + (ok ? (r.text.length + ' 字') : '失败/无结果'), ok ? 'done' : 'warn', ok ? r.text : undefined);
         searchTexts.push('【关键词：' + batch[idx].label + '】\n' + r.text);
       });
     }
@@ -1865,28 +1878,38 @@
   function clearLog() {
     logIdx = 0;
     if (logBodyEl) logBodyEl.textContent = '';
+    const tip = document.querySelector('.lsb-ai-log-tip'); // 清空时收起可能残留的 hover 浮层
+    if (tip) tip.style.display = 'none';
   }
   function showLog(on) {
     if (!logWrapEl) return;
     logWrapEl.classList.toggle('lsb-hidden', !on);
   }
-  function appendLog(msg, kind) {
+  // 视奸窗当前是否贴底（用户停在底部时才自动滚，上滑查看历史时不被新日志拽走）
+  function logNearBottom() {
+    if (!logBodyEl) return true;
+    return logBodyEl.scrollTop + logBodyEl.clientHeight >= logBodyEl.scrollHeight - 24;
+  }
+  // 追加一行；tip 可选：传入后该行 hover 时用浮层显示详情（如搜索结果正文）
+  function appendLog(msg, kind, tip) {
     if (!logBodyEl) return;
     logIdx += 1;
     const line = document.createElement('div');
     line.className = 'lsb-ai-log-line' + (kind ? ' lsb-' + kind : '');
+    if (typeof tip === 'string' && tip.trim()) line.setAttribute('data-tip', tip);
     const idx = document.createElement('span');
     idx.className = 'lsb-ai-log-idx';
     idx.textContent = String(logIdx).padStart(2, '0');
     line.appendChild(idx);
     line.appendChild(document.createTextNode(msg || ''));
     logBodyEl.appendChild(line);
-    logBodyEl.scrollTop = logBodyEl.scrollHeight; // 自动滚到底部
+    // 只在用户位于底部附近时跟随新日志滚动；上滑查看历史时保持原位
+    if (logNearBottom()) logBodyEl.scrollTop = logBodyEl.scrollHeight;
   }
   // 生成期统一进度出口：单行状态（最新）+ 过程窗（累积）
-  function reportProgress(msg, kind) {
+  function reportProgress(msg, kind, tip) {
     setStatus(msg, 'loading');
-    appendLog(msg, kind);
+    appendLog(msg, kind, tip);
   }
 
   function setGenerating(on) {
@@ -2474,6 +2497,43 @@
     document.getElementById('lsb-ai-log-head').addEventListener('click', () => {
       logWrapEl.classList.toggle('collapsed');
     });
+
+    // 视奸窗 hover 浮层：悬停在带 data-tip 的行上显示详情（搜索结果正文），随鼠标移动，离开隐藏
+    let logTipEl = null;
+    let logTipVisible = false;
+    const hideLogTip = () => { logTipVisible = false; if (logTipEl) logTipEl.style.display = 'none'; };
+    const placeLogTip = (clientX, clientY) => {
+      if (!logTipEl || !logTipVisible) return;
+      const pad = 14;
+      let left = clientX + pad;
+      let top = clientY + pad;
+      const r = logTipEl.getBoundingClientRect();
+      if (left + r.width > window.innerWidth - 8) left = Math.max(8, clientX - r.width - pad);
+      if (top + r.height > window.innerHeight - 8) top = Math.max(8, clientY - r.height - pad);
+      logTipEl.style.left = left + 'px';
+      logTipEl.style.top = top + 'px';
+    };
+    const showLogTip = (text, clientX, clientY) => {
+      if (!logTipEl) {
+        logTipEl = document.createElement('div');
+        logTipEl.className = 'lsb-ai-log-tip';
+        document.body.appendChild(logTipEl);
+      }
+      logTipEl.textContent = text;
+      logTipEl.style.display = 'block';
+      logTipVisible = true;
+      placeLogTip(clientX, clientY);
+    };
+    logBodyEl.addEventListener('mouseover', (e) => {
+      const t = e.target;
+      const line = (t && t.closest) ? t.closest('.lsb-ai-log-line[data-tip]') : null;
+      if (line) showLogTip(line.getAttribute('data-tip'), e.clientX, e.clientY);
+    });
+    logBodyEl.addEventListener('mousemove', (e) => {
+      if (logTipVisible) placeLogTip(e.clientX, e.clientY);
+    });
+    logBodyEl.addEventListener('mouseleave', hideLogTip);
+    logBodyEl.addEventListener('scroll', () => { if (logTipVisible) hideLogTip(); }); // 滚动时收起浮层防错位
 
     fab = document.createElement('button');
     fab.id = FAB_ID;
