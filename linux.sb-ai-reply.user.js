@@ -2108,9 +2108,14 @@
     const totalBatches = Math.ceil(searchItems.length / BATCH);
     const rows = [];     // 每个搜索项一行：{ label, text（浅搜摘要文本）, keys（该词全部条目 key，顺序同 items） }
     const candRows = []; // 全局候选池：{ key, label, wordIdx, title, url, snippet }，key='S'+词下标+'-'+条目下标
+    resetSearchSummary();
+    let sumOk = 0;
+    let sumFail = 0;
+    const allBatchTips = []; // 全部批次的词结果段，累积进汇总行 tip
     for (let i = 0; i < searchItems.length; i += BATCH) {
       const batch = searchItems.slice(i, i + BATCH);
-      progress('并行搜索 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.map(b => b.query).join(' | ') + '）…');
+      // 批进度不进日志（避免逐批刷行），只放状态栏；结果统一累积到下方一条「搜索汇总」行
+      setStatus('联网搜索中：第 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.map(b => b.query).join(' | ') + '）…', 'loading');
       // bing/ddg：脚本用 GM_xmlhttpRequest 直连搜索引擎自己抓（免Key、不依赖中转站）；api：沿用中转站内置 web_search 子请求
       const useClientSearch = cfg.searchEngine !== 'api';
       const tasks = batch.map((item) => useClientSearch
@@ -2143,9 +2148,14 @@
         });
         rows.push({ label: batch[idx].label, text: r.text, keys: keys });
       });
-      // 批汇总行（点开看该批全部词的结果/失败原因）
-      const batchOk = failCount === 0;
-      progress('  📦 第 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批完成：成功 ' + okCount + (failCount ? (' · 失败 ' + failCount) : '') + '（点开看本批结果）', batchOk ? 'done' : 'warn', batchTip.join('\n\n'));
+      // 累积进「搜索汇总」单行（原地更新），批多了继续往上加
+      sumOk += okCount;
+      sumFail += failCount;
+      allBatchTips.push(batchTip.join('\n\n'));
+      const doneAll = (i + BATCH) >= searchItems.length;
+      const doneCnt = Math.min(i + BATCH, searchItems.length);
+      const msg = '📦 搜索' + (doneAll ? '完成' : '中') + '：' + sumOk + ' 词成功' + (sumFail ? (' · ' + sumFail + ' 词失败') : '') + (doneAll ? '' : ('（' + doneCnt + '/' + searchItems.length + '）')) + '（点开看全部结果）';
+      updateSearchSummary(msg, allBatchTips.join('\n\n'), sumFail === 0 ? 'done' : 'warn');
     }
 
     // 全局深抓：收齐全部词的候选后，一次 AI 调用跨词挑选值得看正文的条目 → 逐条深抓 → 按 key 回填。
@@ -2250,6 +2260,7 @@
     if (logBodyEl) logBodyEl.textContent = '';
     hideLogPreview(); // 清空时收起可能残留的 hover 预览
     closeLogDetail(); // 同步关掉可能开着的详情弹窗
+    searchSummaryLine = null; // 累积行已随清空失效，下次自动重建
   }
   function showLog(on) {
     if (!logWrapEl) return;
@@ -2281,6 +2292,24 @@
     logBodyEl.appendChild(line);
     // 只在用户位于底部附近时跟随新日志滚动；上滑查看历史时保持原位
     if (logNearBottom()) logBodyEl.scrollTop = logBodyEl.scrollHeight;
+    return line;
+  }
+  // 「搜索汇总」累积行：跨批原地更新（文本/样式/tip），不逐批新开行；clearLog 后自动重建
+  let searchSummaryLine = null;
+  function resetSearchSummary() { searchSummaryLine = null; }
+  function updateSearchSummary(msg, tip, kind) {
+    if (!logBodyEl) return;
+    if (!searchSummaryLine) {
+      searchSummaryLine = appendLog(msg, kind, tip);
+      return;
+    }
+    const line = searchSummaryLine;
+    // 文本节点在行末尾（结构：详情角标? + 序号 + 文本），更新文本与提示
+    const nodes = Array.prototype.slice.call(line.childNodes);
+    const tn = nodes.filter((n) => n.nodeType === 3).pop();
+    if (tn) tn.textContent = msg;
+    line.className = 'lsb-ai-log-line' + (kind ? ' lsb-' + kind : '');
+    if (typeof tip === 'string' && tip.trim()) line.setAttribute('data-tip', tip);
   }
   // 生成期统一进度出口：单行状态（最新）+ 过程窗（累积）
   function reportProgress(msg, kind, tip) {
