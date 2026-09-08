@@ -112,6 +112,7 @@
     enableSearch: false, // 联网搜索总开关
     searchEngine: 'bing', // 搜索执行方式：'bing'/'ddg'=脚本直连搜索引擎（免Key、不依赖中转站）；'api'=中转站内置 web_search 工具（原方式）
     searchTopK: 6, // 客户端直搜时，每个关键词取前 N 条结果
+    searchDeepK: 2, // 深抓正文：对前 N 条结果再抓一次目标网页正文（0=关闭，仅用搜索引擎摘要；1-3 控制条数）
     searchBatch: 3, // 联网搜索并行批大小（每批同时发几个搜索子请求）
     requestTimeout: 180, // 单次请求超时（秒）
     maxRetry: 2 // 可重试失败的最大重试次数（网络/超时/503 等）
@@ -600,6 +601,8 @@
     if (!(cfg.searchBatch >= 1)) cfg.searchBatch = DEFAULTS.searchBatch;
     cfg.searchTopK = Number(cfg.searchTopK);
     if (!(cfg.searchTopK >= 1)) cfg.searchTopK = DEFAULTS.searchTopK;
+    cfg.searchDeepK = Number(cfg.searchDeepK);
+    if (!(cfg.searchDeepK >= 0 && cfg.searchDeepK <= 3)) cfg.searchDeepK = DEFAULTS.searchDeepK;
     if (!['bing', 'ddg', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
     if (!(cfg.requestTimeout >= 5)) cfg.requestTimeout = DEFAULTS.requestTimeout;
     if (!(cfg.maxRetry >= 0)) cfg.maxRetry = DEFAULTS.maxRetry;
@@ -1452,12 +1455,54 @@
     }
   };
 
+  // 深抓目标网页正文：再 GET 一次搜索结果 URL，按优先级容器提取可读段落文本。
+  // 失败 reject（上层降级：该条仍保留搜索引擎摘要，不拖累整组）。
+  function fetchPageText(url, timeoutSec) {
+    const t = timeoutSec || 12;
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url,
+        timeout: t * 1000,
+        headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }, // 不覆盖 UA（受限头）
+        onload: (resp) => {
+          if (!(resp.status >= 200 && resp.status < 300)) { reject(new Error('HTTP ' + resp.status)); return; }
+          let doc;
+          try { doc = new DOMParser().parseFromString(resp.responseText || '', 'text/html'); }
+          catch (e) { reject(new Error('HTML 解析失败')); return; }
+          // 候选正文容器：语义化标签优先（维基 mw-content-text、GitHub markdown-body 等），退到 body
+          const cands = ['article', '#mw-content-text', 'main', '.markdown-body', '.post-content', '.entry-content', '.article-content', 'body'];
+          let node = null;
+          for (const sel of cands) {
+            if (sel === 'body') { node = doc.body; break; }
+            const el = doc.querySelector(sel);
+            if (el && (el.textContent || '').trim().length > 60) { node = el; break; }
+          }
+          if (!node) { reject(new Error('无可读正文')); return; }
+          const clone = node.cloneNode(true);
+          // 剥无关块：导航/页脚/侧栏/广告/评论区等
+          clone.querySelectorAll('script,style,noscript,nav,footer,header,aside,form,iframe,svg,.ad,.ads,.advertisement,.advert,.cookie,.cookie-banner,.banner,#footer,#header,.nav,.menu,.menus,.sidebar,.comment,.comments,.social-share,.related,.recommend,.recommended').forEach((el) => el.remove());
+          let text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+          // 去除明显的模板噪音（导航词堆叠等场景无法完全规避，先保证长度与可读性）
+          if (text.length < 80) { reject(new Error('正文过短（可能需登录或 JS 渲染）')); return; }
+          resolve(text.slice(0, 2000));
+        },
+        onerror: () => reject(new Error('网络错误')),
+        ontimeout: () => reject(new Error('超时(' + t + 's)')),
+        onabort: () => reject(new Error('请求中止'))
+      });
+    });
+  }
+
   // 执行一次客户端直搜，resolve 出喂给模型的纯文本；失败 reject，由阶段3分批容错兜住（单条失败不拖垮整批）
-  function clientWebSearch(cfg, query) {
+  // onStep 可选：深抓阶段的进度消息（进视奸窗，不影响结果文本）
+  function clientWebSearch(cfg, query, onStep) {
     const engineName = CLIENT_SEARCH_ENGINES[cfg.searchEngine] ? cfg.searchEngine : 'bing';
     const engine = CLIENT_SEARCH_ENGINES[engineName];
     const topK = (Number(cfg.searchTopK) >= 1 ? Math.floor(Number(cfg.searchTopK)) : 6);
+    const deepK = Math.min(Math.max(Number(cfg.searchDeepK) >= 0 ? Math.floor(Number(cfg.searchDeepK)) : 2, 0), topK);
     const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 30); // 搜索是快请求，封顶 30s
+    const step = (m) => { if (typeof onStep === 'function') { try { onStep(m); } catch (e) { /* 忽略 */ } } };
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'GET',
@@ -1473,11 +1518,32 @@
           try { items = engine.parse(doc, topK); }
           catch (e) { reject(new Error('解析搜索结果失败：' + (e.message || e))); return; }
           if (!items.length) { reject(new Error('无结果（可能被搜索引擎反爬拦截，可换搜索源重试）')); return; }
-          const text = items.map((it, i) => {
+          const formatItems = (list, deepMap) => list.map((it, i) => {
+            const body = deepMap[i];
             const sn = it.snippet.length > 300 ? it.snippet.slice(0, 300) + '…' : it.snippet;
-            return (i + 1) + '. ' + it.title + '\n链接：' + it.url + (sn ? '\n摘要：' + sn : '');
+            let s = (i + 1) + '. ' + it.title + '\n链接：' + it.url;
+            if (body) s += '\n[页面正文 ' + body.length + ' 字] ' + body;
+            else if (sn) s += '\n摘要：' + sn;
+            return s;
           }).join('\n');
-          resolve(text);
+          if (!deepK) { resolve(formatItems(items, {})); return; }
+          // 对前 deepK 条逐条深抓（串行，避免对目标站并发触发反爬），失败项保留摘要
+          const targets = items.slice(0, deepK);
+          const deepMap = {};
+          const run = (i) => {
+            if (i >= targets.length) { resolve(formatItems(items, deepMap)); return; }
+            const it = targets[i];
+            step('  ↧ 深抓 ' + (i + 1) + '/' + targets.length + '：' + (it.url.length > 90 ? it.url.slice(0, 90) + '…' : it.url));
+            fetchPageText(it.url, 12).then((txt) => {
+              deepMap[items.indexOf(it)] = txt;
+              step('    ✓ ' + it.title.slice(0, 30) + '：正文 ' + txt.length + ' 字');
+              run(i + 1);
+            }).catch((e) => {
+              step('    ↷ ' + it.title.slice(0, 30) + '：深抓失败（' + (e.message || e) + '），保留摘要');
+              run(i + 1);
+            });
+          };
+          run(0);
         },
         onerror: () => reject(new Error('搜索网络错误')),
         ontimeout: () => reject(new Error('搜索超时（' + timeoutSec + 's）'))
@@ -1838,7 +1904,7 @@
       // bing/ddg：脚本用 GM_xmlhttpRequest 直连搜索引擎自己抓（免Key、不依赖中转站）；api：沿用中转站内置 web_search 子请求
       const useClientSearch = cfg.searchEngine !== 'api';
       const tasks = batch.map((item) => useClientSearch
-        ? clientWebSearch(cfg, item.query)
+        ? clientWebSearch(cfg, item.query, (m) => appendLog(m, 'kw')) // 深抓进度直进视奸窗（紫），不动状态栏
         : sendRequest(buildRequest(cfg, {
             system: '你是一个联网搜索助手。请对用户给出的关键词执行联网搜索，并把搜索结果的内容整理出来。',
             userContent: item.query,
@@ -1964,7 +2030,8 @@
       enableImage: $('enableImage').checked,
       enableSearch: $('enableSearch').checked,
       searchEngine: ($('searchEngine') && $('searchEngine').value) || 'bing',
-      searchTopK: Math.max(1, num('searchTopK', DEFAULTS.searchTopK))
+      searchTopK: Math.max(1, num('searchTopK', DEFAULTS.searchTopK)),
+      searchDeepK: Math.max(0, Math.min(3, num('searchDeepK', DEFAULTS.searchDeepK)))
     };
   }
 
@@ -1979,6 +2046,7 @@
     $('maxContextChars').value = cfg.maxContextChars;
     $('searchBatch').value = cfg.searchBatch;
     $('searchTopK').value = cfg.searchTopK;
+    if ($('searchDeepK')) $('searchDeepK').value = cfg.searchDeepK;
     $('requestTimeout').value = cfg.requestTimeout;
     $('maxRetry').value = cfg.maxRetry;
     $('includeSpeaker').checked = !!cfg.includeSpeaker;
@@ -2452,6 +2520,10 @@
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">每词取结果条数（客户端直搜 1-10）</label>
               <input class="lsb-ai-input" id="lsb-ai-cfg-searchTopK" type="number" min="1" max="10" step="1">
+            </div>
+            <div class="lsb-ai-row">
+              <label class="lsb-ai-label">深抓正文条数（0 关·抓前 N 条网页正文替代空摘要）</label>
+              <input class="lsb-ai-input" id="lsb-ai-cfg-searchDeepK" type="number" min="0" max="3" step="1">
             </div>
             <div class="lsb-ai-row">
               <span class="lsb-ai-hint">系统提示词已移到上方「语气 / 提示词」——点那里的「✎ 编辑」可增删改各套提示词。</span>
