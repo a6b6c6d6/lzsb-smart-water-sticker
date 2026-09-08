@@ -1502,7 +1502,7 @@
     const topK = (Number(cfg.searchTopK) >= 1 ? Math.floor(Number(cfg.searchTopK)) : 6);
     const deepK = Math.min(Math.max(Number(cfg.searchDeepK) >= 0 ? Math.floor(Number(cfg.searchDeepK)) : 2, 0), topK);
     const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 30); // 搜索是快请求，封顶 30s
-    const step = (m) => { if (typeof onStep === 'function') { try { onStep(m); } catch (e) { /* 忽略 */ } } };
+    const step = (m, tip) => { if (typeof onStep === 'function') { try { onStep(m, tip); } catch (e) { /* 忽略 */ } } };
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'GET',
@@ -1533,13 +1533,13 @@
           const run = (i) => {
             if (i >= targets.length) { resolve(formatItems(items, deepMap)); return; }
             const it = targets[i];
-            step('  ↧ 深抓 ' + (i + 1) + '/' + targets.length + '：' + (it.url.length > 90 ? it.url.slice(0, 90) + '…' : it.url));
+            step('  ↧ 深抓 ' + (i + 1) + '/' + targets.length + '：' + (it.url.length > 90 ? it.url.slice(0, 90) + '…' : it.url), it.url);
             fetchPageText(it.url, 12).then((txt) => {
               deepMap[items.indexOf(it)] = txt;
-              step('    ✓ ' + it.title.slice(0, 30) + '：正文 ' + txt.length + ' 字');
+              step('    ✓ ' + it.title.slice(0, 30) + '：正文 ' + txt.length + ' 字', '【' + it.title + '】\n链接：' + it.url + '\n\n' + txt);
               run(i + 1);
             }).catch((e) => {
-              step('    ↷ ' + it.title.slice(0, 30) + '：深抓失败（' + (e.message || e) + '），保留摘要');
+              step('    ↷ ' + it.title.slice(0, 30) + '：深抓失败（' + (e.message || e) + '），保留摘要', '深抓失败：' + it.url + '\n' + (e.message || e));
               run(i + 1);
             });
           };
@@ -1904,7 +1904,7 @@
       // bing/ddg：脚本用 GM_xmlhttpRequest 直连搜索引擎自己抓（免Key、不依赖中转站）；api：沿用中转站内置 web_search 子请求
       const useClientSearch = cfg.searchEngine !== 'api';
       const tasks = batch.map((item) => useClientSearch
-        ? clientWebSearch(cfg, item.query, (m) => appendLog(m, 'kw')) // 深抓进度直进视奸窗（紫），不动状态栏
+        ? clientWebSearch(cfg, item.query, (m, tip) => appendLog(m, 'kw', tip)) // 深抓进度直进视奸窗（紫），tip 挂正文/原因
         : sendRequest(buildRequest(cfg, {
             system: '你是一个联网搜索助手。请对用户给出的关键词执行联网搜索，并把搜索结果的内容整理出来。',
             userContent: item.query,
