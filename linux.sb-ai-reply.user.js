@@ -1565,6 +1565,46 @@
     }
   };
 
+  // 让 AI 从搜索条目里挑值得深抓正文的（最多 maxN 条）。resolve 0-based 索引数组：
+  // 空数组=判定无需深抓；null=选择失败（调用方回退默认前 maxN 条）
+  function parsePickList(text) {
+    const t = String(text == null ? '' : text).trim();
+    let obj = null;
+    try { obj = JSON.parse(t); } catch (e) {
+      const m = t.match(/\{[\s\S]*\}/);
+      if (m) { try { obj = JSON.parse(m[0]); } catch (e2) { obj = null; } }
+    }
+    if (obj && Array.isArray(obj.pick)) return obj.pick;
+    if (Array.isArray(obj)) return obj;
+    return null;
+  }
+  function pickDeepTargets(cfg, query, items, maxN) {
+    const listTxt = items.map((it, i) => {
+      const sn = (it.snippet || '').length > 300 ? it.snippet.slice(0, 300) + '…' : (it.snippet || '');
+      return (i + 1) + '. ' + (it.title || '') + '\n   链接：' + (it.url || '') + (sn ? '\n   摘要：' + sn : '');
+    }).join('\n');
+    const sys = '你是检索结果筛选助手。从候选结果中挑选「值得抓取网页正文来辅助回帖」的条目：官方文档/百科/原文/教程正文等有实质信息价值的才选；站内首页、登录页、商城、纯列表页、与本主题无关、明显低质的不要选。';
+    const usr = '查询主题：' + query + '\n需要从中挑选最多 ' + maxN + ' 条做网页正文深抓。只输出一个 JSON 对象 {"pick":[条目序号数组]}，没有值得深抓的输出 {"pick":[]}，不要输出其它文字。\n\n候选条目：\n' + listTxt;
+    return new Promise((resolveP) => {
+      let req;
+      try { req = buildRequest(cfg, { system: sys, userContent: usr, images: undefined, tools: undefined }); }
+      catch (e) { resolveP(null); return; }
+      req.timeout = 15000; // 挑选是快请求
+      sendRequestOnce(req).then((r) => {
+        const idxs = parsePickList(r && r.text);
+        if (!idxs) { resolveP(null); return; }
+        const out = [];
+        for (const n of idxs) {
+          const z = Number(n) - 1; // 1-based → 0-based
+          if (!isFinite(z) || z < 0 || z >= items.length || out.indexOf(z) >= 0) continue;
+          out.push(z);
+          if (out.length >= maxN) break;
+        }
+        resolveP(out);
+      }).catch(() => resolveP(null));
+    });
+  }
+
   // 深抓目标网页正文：再 GET 一次搜索结果 URL，按优先级容器提取可读段落文本。
   // 失败 reject（上层降级：该条仍保留搜索引擎摘要，不拖累整组）。
   function fetchPageText(url, timeoutSec) {
@@ -1639,9 +1679,8 @@
             return s;
           }).join('\n');
           if (!deepK) { resolve(formatItems(items, {})); return; }
-          // 对前 deepK 条逐条深抓（串行，避免对目标站并发触发反爬），失败项保留摘要。
+          // 对选中条目逐条深抓（串行，避免对目标站并发触发反爬），失败项保留摘要。
           // 过程不再逐条刷视奸窗（太杂），完成后只落一行汇总（青色），hover/点击固定可看全部明细
-          const targets = items.slice(0, deepK);
           const deepMap = {};
           // 本站页面（含正在看的原帖，被搜索引擎收录后会命中自己）跳过深抓：
           // 正文已在抓帖阶段拿到，深抓纯属重复且易撞登录墙，保留搜索摘要即可
@@ -1649,37 +1688,56 @@
             try { return new URL(u, location.href).hostname === location.hostname; } catch (e) { return false; }
           };
           const deepSteps = []; // { title,url,ok,skip,info,text }
-          const run = (i) => {
-            if (i >= targets.length) {
-              if (deepSteps.length) {
-                const okN = deepSteps.filter((s) => s.ok).length;
-                const badN = deepSteps.filter((s) => !s.ok && !s.skip).length;
-                const skipN = deepSteps.filter((s) => s.skip).length;
-                const detail = deepSteps.map((s, k) => {
-                  const st = s.ok ? ('✅正文 ' + s.text.length + ' 字') : (s.skip ? '⏭ 本站页面跳过' : ('❌' + (s.info || '失败') + '（保留摘要）'));
-                  return '[' + (k + 1) + '] ' + (s.title || '') + ' ' + st + '\n链接：' + s.url + (s.text ? ('\n\n' + s.text) : '');
-                }).join('\n\n');
-                step('  🕳 深抓完成：成功 ' + okN + (badN ? (' · 失败 ' + badN) : '') + (skipN ? (' · 跳过 ' + skipN) : '') + '（点开看明细）', '深抓明细：\n\n' + detail);
+          const runDeep = (targets) => {
+            const run = (i) => {
+              if (i >= targets.length) {
+                if (deepSteps.length) {
+                  const okN = deepSteps.filter((s) => s.ok).length;
+                  const badN = deepSteps.filter((s) => !s.ok && !s.skip).length;
+                  const skipN = deepSteps.filter((s) => s.skip).length;
+                  const detail = deepSteps.map((s, k) => {
+                    const st = s.ok ? ('✅正文 ' + s.text.length + ' 字') : (s.skip ? '⏭ 本站页面跳过' : ('❌' + (s.info || '失败') + '（保留摘要）'));
+                    return '[' + (k + 1) + '] ' + (s.title || '') + ' ' + st + '\n链接：' + s.url + (s.text ? ('\n\n' + s.text) : '');
+                  }).join('\n\n');
+                  step('  🕳 深抓完成：成功 ' + okN + (badN ? (' · 失败 ' + badN) : '') + (skipN ? (' · 跳过 ' + skipN) : '') + '（点开看明细）', '深抓明细：\n\n' + detail);
+                }
+                resolve(formatItems(items, deepMap));
+                return;
               }
-              resolve(formatItems(items, deepMap));
-              return;
-            }
-            const it = targets[i];
-            if (isSameSite(it.url)) {
-              deepSteps.push({ title: it.title, url: it.url, ok: false, skip: true });
-              run(i + 1);
-              return;
-            }
-            fetchPageText(it.url, 12).then((txt) => {
-              deepMap[items.indexOf(it)] = txt;
-              deepSteps.push({ title: it.title, url: it.url, ok: true, text: txt });
-              run(i + 1);
-            }).catch((e) => {
-              deepSteps.push({ title: it.title, url: it.url, ok: false, info: (e && e.message) || '失败' });
-              run(i + 1);
-            });
+              const it = targets[i];
+              if (isSameSite(it.url)) {
+                deepSteps.push({ title: it.title, url: it.url, ok: false, skip: true });
+                run(i + 1);
+                return;
+              }
+              fetchPageText(it.url, 12).then((txt) => {
+                deepMap[items.indexOf(it)] = txt;
+                deepSteps.push({ title: it.title, url: it.url, ok: true, text: txt });
+                run(i + 1);
+              }).catch((e) => {
+                deepSteps.push({ title: it.title, url: it.url, ok: false, info: (e && e.message) || '失败' });
+                run(i + 1);
+              });
+            };
+            run(0);
           };
-          run(0);
+          // 条目数超过深抓配额时，先让 AI 按标题/摘要挑选值得深抓的（避免盲抓不相关页）；
+          // 选择失败自动回退默认前 deepK 条
+          if (items.length > deepK) {
+            pickDeepTargets(cfg, query, items, deepK).then((picked) => {
+              if (picked && picked.length) {
+                step('  🧠 AI 从 ' + items.length + ' 条结果中选定 ' + picked.length + ' 条深抓');
+                runDeep(picked.map((i) => items[i]));
+              } else if (picked) {
+                step('  🧠 AI 判定这组结果不值得深抓，全部保留摘要');
+                runDeep([]);
+              } else {
+                runDeep(items.slice(0, deepK)); // 选择请求失败 → 回退默认
+              }
+            });
+          } else {
+            runDeep(items.slice(0, deepK));
+          }
         },
         onerror: () => reject(new Error('搜索网络错误')),
         ontimeout: () => reject(new Error('搜索超时（' + timeoutSec + 's）'))
