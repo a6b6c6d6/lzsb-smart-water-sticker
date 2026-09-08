@@ -1644,17 +1644,13 @@
     });
   }
 
-  // 执行一次客户端直搜，resolve 出喂给模型的纯文本；失败 reject，由阶段3分批容错兜住（单条失败不拖垮整批）
-  // onStep 可选：深抓阶段的进度消息（进视奸窗，不影响结果文本）；deepKOverride=0 时本词跳过深抓（浅查）
-  function clientWebSearch(cfg, query, onStep, deepKOverride) {
+  // 执行一次客户端直搜（纯浅搜，不再内嵌深抓）：resolve { text, items }，
+  // 由阶段3 收齐所有词的条目后统一做「AI 全局挑选 → 深抓」。失败 reject，单条失败不拖垮整批。
+  function clientWebSearch(cfg, query) {
     const engineName = CLIENT_SEARCH_ENGINES[cfg.searchEngine] ? cfg.searchEngine : 'bing';
     const engine = CLIENT_SEARCH_ENGINES[engineName];
     const topK = (Number(cfg.searchTopK) >= 1 ? Math.floor(Number(cfg.searchTopK)) : 6);
-    const deepK = (deepKOverride === 0)
-      ? 0
-      : Math.min(Math.max(Number(cfg.searchDeepK) >= 0 ? Math.floor(Number(cfg.searchDeepK)) : 2, 0), topK);
     const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 30); // 搜索是快请求，封顶 30s
-    const step = (m, tip) => { if (typeof onStep === 'function') { try { onStep(m, tip); } catch (e) { /* 忽略 */ } } };
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'GET',
@@ -1670,74 +1666,11 @@
           try { items = engine.parse(doc, topK); }
           catch (e) { reject(new Error('解析搜索结果失败：' + (e.message || e))); return; }
           if (!items.length) { reject(new Error('无结果（可能被搜索引擎反爬拦截，可换搜索源重试）')); return; }
-          const formatItems = (list, deepMap) => list.map((it, i) => {
-            const body = deepMap[i];
-            const sn = it.snippet.length > 300 ? it.snippet.slice(0, 300) + '…' : it.snippet;
-            let s = (i + 1) + '. ' + it.title + '\n链接：' + it.url;
-            if (body) s += '\n[页面正文 ' + body.length + ' 字] ' + body;
-            else if (sn) s += '\n摘要：' + sn;
-            return s;
+          const text = items.map((it, i) => {
+            const sn = (it.snippet || '').length > 300 ? it.snippet.slice(0, 300) + '…' : (it.snippet || '');
+            return (i + 1) + '. ' + it.title + '\n链接：' + it.url + (sn ? '\n摘要：' + sn : '');
           }).join('\n');
-          if (!deepK) { resolve(formatItems(items, {})); return; }
-          // 对选中条目逐条深抓（串行，避免对目标站并发触发反爬），失败项保留摘要。
-          // 过程不再逐条刷视奸窗（太杂），完成后只落一行汇总（青色），hover/点击固定可看全部明细
-          const deepMap = {};
-          // 本站页面（含正在看的原帖，被搜索引擎收录后会命中自己）跳过深抓：
-          // 正文已在抓帖阶段拿到，深抓纯属重复且易撞登录墙，保留搜索摘要即可
-          const isSameSite = (u) => {
-            try { return new URL(u, location.href).hostname === location.hostname; } catch (e) { return false; }
-          };
-          const deepSteps = []; // { title,url,ok,skip,info,text }
-          const runDeep = (targets) => {
-            const run = (i) => {
-              if (i >= targets.length) {
-                if (deepSteps.length) {
-                  const okN = deepSteps.filter((s) => s.ok).length;
-                  const badN = deepSteps.filter((s) => !s.ok && !s.skip).length;
-                  const skipN = deepSteps.filter((s) => s.skip).length;
-                  const detail = deepSteps.map((s, k) => {
-                    const st = s.ok ? ('✅正文 ' + s.text.length + ' 字') : (s.skip ? '⏭ 本站页面跳过' : ('❌' + (s.info || '失败') + '（保留摘要）'));
-                    return '[' + (k + 1) + '] ' + (s.title || '') + ' ' + st + '\n链接：' + s.url + (s.text ? ('\n\n' + s.text) : '');
-                  }).join('\n\n');
-                  step('  🕳 深抓完成：成功 ' + okN + (badN ? (' · 失败 ' + badN) : '') + (skipN ? (' · 跳过 ' + skipN) : '') + '（点开看明细）', '深抓明细：\n\n' + detail);
-                }
-                resolve(formatItems(items, deepMap));
-                return;
-              }
-              const it = targets[i];
-              if (isSameSite(it.url)) {
-                deepSteps.push({ title: it.title, url: it.url, ok: false, skip: true });
-                run(i + 1);
-                return;
-              }
-              fetchPageText(it.url, 12).then((txt) => {
-                deepMap[items.indexOf(it)] = txt;
-                deepSteps.push({ title: it.title, url: it.url, ok: true, text: txt });
-                run(i + 1);
-              }).catch((e) => {
-                deepSteps.push({ title: it.title, url: it.url, ok: false, info: (e && e.message) || '失败' });
-                run(i + 1);
-              });
-            };
-            run(0);
-          };
-          // 条目数超过深抓配额时，先让 AI 按标题/摘要挑选值得深抓的（避免盲抓不相关页）；
-          // 选择失败自动回退默认前 deepK 条
-          if (items.length > deepK) {
-            pickDeepTargets(cfg, query, items, deepK).then((picked) => {
-              if (picked && picked.length) {
-                step('  🧠 AI 从 ' + items.length + ' 条结果中选定 ' + picked.length + ' 条深抓');
-                runDeep(picked.map((i) => items[i]));
-              } else if (picked) {
-                step('  🧠 AI 判定这组结果不值得深抓，全部保留摘要');
-                runDeep([]);
-              } else {
-                runDeep(items.slice(0, deepK)); // 选择请求失败 → 回退默认
-              }
-            });
-          } else {
-            runDeep(items.slice(0, deepK));
-          }
+          resolve({ text: text, items: items, searched: true });
         },
         onerror: () => reject(new Error('搜索网络错误')),
         ontimeout: () => reject(new Error('搜索超时（' + timeoutSec + 's）'))
