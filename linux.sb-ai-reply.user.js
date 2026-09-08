@@ -294,30 +294,74 @@
     .lsb-ai-log-line.lsb-deep { color: #0e7490; } /* 深抓汇总行：青色，与关键词紫/成功绿区分 */
     .lsb-ai-log-line.lsb-warn { color: #d97706; }
     .lsb-ai-log-line.lsb-done { color: #059669; }
-    /* 视奸窗 hover 悬浮详情：搜索结果内容浮层（body 级，避免被滚动容器裁剪） */
-    .lsb-ai-log-line[data-tip] { cursor: help; border-bottom: 1px dotted rgba(37, 99, 235, .35); }
+    /* 视奸窗行尾「详情」角标：提示该行可点开详情弹窗 */
+    .lsb-ai-log-line[data-tip] { cursor: pointer; border-bottom: 1px dotted rgba(37, 99, 235, .35); }
+    .lsb-ai-log-more {
+      float: right; color: #2563eb; font-weight: 400; cursor: pointer;
+      padding: 0 3px; border-radius: 4px; font-size: 10px;
+    }
+    .lsb-ai-log-more:hover { background: rgba(37, 99, 235, .12); }
+    /* 视奸窗 hover 轻预览：锚定行下方（不跟鼠标、防抖出现），可移入滚动/选中/复制。
+       层级必须高于面板（2147483001），否则会被面板整块盖住（旧版 bug） */
     .lsb-ai-log-tip {
-      position: fixed; z-index: 2147483000; display: none;
-      max-width: 480px; max-height: 280px; overflow: auto;
+      position: fixed; z-index: 2147483005; display: none;
+      width: 480px; max-width: calc(100vw - 24px); max-height: 300px; overflow: auto;
       background: #ffffff; color: #1e293b;
       border: 1px solid #cbd5e1; border-radius: 8px;
       box-shadow: 0 6px 20px rgba(15, 23, 42, .18);
       padding: 8px 10px; font-size: 12px; line-height: 1.6;
       white-space: pre-wrap; word-break: break-all;
-      pointer-events: none;
     }
-    /* 视奸窗内"已固定"的搜索结果详情：点击某行后插入到该行下方，固定查看、不被 hover 抢占 */
-    .lsb-ai-log-line.pinned-tip {
-      cursor: default;
-      background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px;
-      padding: 6px 9px; margin: 2px 0;
-      max-height: 220px; overflow: auto;
+    .lsb-ai-log-tip a { color: #2563eb; text-decoration: underline; word-break: break-all; }
+    /* 视奸窗详情弹窗：复用 .lsb-ai-modal 遮罩层，点击行时打开，长文细读/复制在这里 */
+    .lsb-ai-log-modal-box {
+      width: 640px; max-width: calc(100vw - 32px);
+      max-height: calc(100vh - 48px);
+      display: flex; flex-direction: column;
+      background: #fff; color: #1f2937;
+      border-radius: 14px; box-shadow: 0 16px 48px rgba(0, 0, 0, .3);
+      overflow: hidden; font-size: 13px;
+    }
+    .lsb-ai-log-modal-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; border-bottom: 1px solid #e5e7eb; background: #f9fafb;
+    }
+    .lsb-ai-log-modal-title { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lsb-ai-log-modal-copy, .lsb-ai-log-modal-close {
+      border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
+      padding: 5px 10px; flex: 0 0 auto; font-family: inherit;
+    }
+    .lsb-ai-log-modal-copy { background: #2563eb; color: #fff; }
+    .lsb-ai-log-modal-copy:hover { background: #1d4ed8; }
+    .lsb-ai-log-modal-copy.copied { background: #059669; }
+    .lsb-ai-log-modal-close { background: #f3f4f6; color: #1f2937; border: 1px solid #d1d5db; }
+    .lsb-ai-log-modal-close:hover { background: #e5e7eb; }
+    .lsb-ai-log-modal-body {
+      padding: 12px 14px; overflow-y: auto;
       font-size: 12px; line-height: 1.6; color: #1e293b;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
       white-space: pre-wrap; word-break: break-all;
     }
-    .lsb-ai-log-line.pinned-tip .lsb-ai-log-pin-head { color: #2563eb; font-weight: 600; margin-bottom: 4px; }
-    .lsb-ai-log-line.pinned-tip .lsb-ai-log-pin-close { float: right; cursor: pointer; color: #64748b; font-weight: 400; }
-    .lsb-ai-log-line.pinned-tip .lsb-ai-log-pin-close:hover { color: #dc2626; }
+    .lsb-ai-log-modal-body a { color: #2563eb; text-decoration: underline; word-break: break-all; }
+    /* 深抓明细结构化渲染：每条一个可折叠块（默认收起），点标题行展开看正文 */
+    .lsb-ai-deep-item { border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 8px; background: #fff; }
+    .lsb-ai-deep-item-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 10px; cursor: pointer; user-select: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 12px; color: #334155;
+    }
+    .lsb-ai-deep-item-head:hover { background: #f1f5f9; }
+    .lsb-ai-deep-item-head .lsb-ai-deep-arrow { color: #94a3b8; transition: transform .15s ease; flex: 0 0 auto; }
+    .lsb-ai-deep-item.open .lsb-ai-deep-arrow { transform: rotate(90deg); }
+    .lsb-ai-deep-item-head .lsb-ai-deep-status { flex: 0 0 auto; font-weight: 600; }
+    .lsb-ai-deep-item-head .lsb-ai-deep-status.ok { color: #059669; }
+    .lsb-ai-deep-item-head .lsb-ai-deep-status.bad { color: #d97706; }
+    .lsb-ai-deep-item-head .lsb-ai-deep-status.skip { color: #0e7490; }
+    .lsb-ai-deep-item-head .lsb-ai-deep-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lsb-ai-deep-item-body { display: none; padding: 8px 10px; border-top: 1px solid #e2e8f0; }
+    .lsb-ai-deep-item.open .lsb-ai-deep-item-body { display: block; }
+    .lsb-ai-deep-item-body .lsb-ai-deep-link { display: block; margin-bottom: 6px; font-size: 12px; }
 
     .lsb-ai-preview {
       min-height: 110px;
@@ -1565,8 +1609,7 @@
     }
   };
 
-  // 让 AI 从搜索条目里挑值得深抓正文的（最多 maxN 条）。resolve 0-based 索引数组：
-  // 空数组=判定无需深抓；null=选择失败（调用方回退默认前 maxN 条）
+  // 宽松解析挑选结果：接受 {"pick":[...]} 或裸数组，两者都失败返回 null（调用方据此回退）
   function parsePickList(text) {
     const t = String(text == null ? '' : text).trim();
     let obj = null;
@@ -1578,31 +1621,62 @@
     if (Array.isArray(obj)) return obj;
     return null;
   }
-  function pickDeepTargets(cfg, query, items, maxN) {
-    const listTxt = items.map((it, i) => {
-      const sn = (it.snippet || '').length > 300 ? it.snippet.slice(0, 300) + '…' : (it.snippet || '');
-      return (i + 1) + '. ' + (it.title || '') + '\n   链接：' + (it.url || '') + (sn ? '\n   摘要：' + sn : '');
+  // 全局挑选的脚本侧硬上限：AI 超发时截断，避免一次深抓几十页把上下文和耗时撑爆
+  const PICK_HARD_LIMIT = 10;
+
+  // 全局挑选：把「全部搜索词 × 全部浅搜条目」做成一份带唯一 key 的清单，一次 AI 调用挑出值得深抓正文的条目。
+  // candRows: [{ key, label, wordIdx, title, url, snippet }]，key 形如 'S0-2'（第1个搜索词的第3条）。
+  // resolve key 数组（空数组=AI 判定无需深抓）；重试 2 次后仍请求/解析失败 → resolve null，调用方回退「每词前 searchDeepK 条」。
+  // 只给 AI 看标题/链接/短摘要 + 量级预算，不喂正文——抓几条由它按预算自己定。
+  function pickGlobal(cfg, candRows, nWords) {
+    const listTxt = candRows.map((c) => {
+      const sn = (c.snippet || '').length > 180 ? c.snippet.slice(0, 180) + '…' : (c.snippet || '');
+      return '[' + c.key + '] 【' + c.label + '】' + (c.title || '') + '\n   链接：' + (c.url || '') + (sn ? '\n   摘要：' + sn : '');
     }).join('\n');
-    const sys = '你是检索结果筛选助手。从候选结果中挑选「值得抓取网页正文来辅助回帖」的条目：官方文档/百科/原文/教程正文等有实质信息价值的才选；站内首页、登录页、商城、纯列表页、与本主题无关、明显低质的不要选。';
-    const usr = '查询主题：' + query + '\n需要从中挑选最多 ' + maxN + ' 条做网页正文深抓。只输出一个 JSON 对象 {"pick":[条目序号数组]}，没有值得深抓的输出 {"pick":[]}，不要输出其它文字。\n\n候选条目：\n' + listTxt;
-    return new Promise((resolveP) => {
+    const sys = '你是检索结果筛选助手。从多个搜索词的候选结果中挑选「值得抓取网页正文来辅助回帖」的条目：官方文档/百科/新闻原文/教程正文等有实质信息价值的才选；站内首页、登录页、商城、纯列表页、与本主题无关、明显低质的不要选。';
+    const usr = '本次共 ' + nWords + ' 个搜索词、' + candRows.length + ' 条候选结果。\n'
+      + '将对选中的条目抓取网页正文，单条约可获得 500-4000 字。\n'
+      + '请挑选「对撰写回帖最有信息价值、值得看正文」的条目，深抓正文总量建议控制在约 8000-14000 字（约 3-6 条）；宁少勿滥；排除站内首页/登录页/商城/纯目录页/与主题无关的条目。\n'
+      + '只输出 JSON {"pick":["S0-2"]}（元素为下面清单每条开头方括号里的 key）；无需深抓则 {"pick":[]}；不要输出其它文字。\n\n候选条目：\n' + listTxt;
+    // 单次尝试：成功 → 校验/去重/截断后的 key 数组；失败 → null。挑选取的是「null=失败」而非 reject，
+    // 这样 {"pick":[]}（AI 明确说不用抓）不会被误当成失败重跑。
+    const attempt = () => new Promise((resolveP) => {
       let req;
       try { req = buildRequest(cfg, { system: sys, userContent: usr, images: undefined, tools: undefined }); }
       catch (e) { resolveP(null); return; }
-      req.timeout = 15000; // 挑选是快请求
+      req.timeout = 20000; // 挑选是快请求
       sendRequestOnce(req).then((r) => {
-        const idxs = parsePickList(r && r.text);
-        if (!idxs) { resolveP(null); return; }
+        const picked = parsePickList(r && r.text);
+        if (!picked) { resolveP(null); return; }
+        const valid = Object.create(null);
+        candRows.forEach((c) => { valid[c.key] = true; });
         const out = [];
-        for (const n of idxs) {
-          const z = Number(n) - 1; // 1-based → 0-based
-          if (!isFinite(z) || z < 0 || z >= items.length || out.indexOf(z) >= 0) continue;
-          out.push(z);
-          if (out.length >= maxN) break;
+        for (const k of picked) {
+          const key = String(k == null ? '' : k).trim().toUpperCase(); // 兼容 AI 输出小写 's0-2'
+          if (!valid[key] || out.indexOf(key) >= 0) continue; // 过滤不存在的 key + 去重
+          out.push(key);
+          if (out.length >= PICK_HARD_LIMIT) break;
         }
         resolveP(out);
       }).catch(() => resolveP(null));
     });
+    // 失败自动重试 2 次（退避 1s→2s，与 sendRequest 一致）：服务器繁忙/解析偶发失败时
+    // 尽量保住「AI 全局挑选」路径，重试穷尽才回退每词兜底
+    return (async () => {
+      const MAX_RETRY = 2;
+      for (let i = 0; ; i++) {
+        const r = await attempt();
+        if (r !== null) return r;
+        if (i >= MAX_RETRY) return null;
+        await delay(1000 * (i + 1));
+      }
+    })();
+  }
+
+  // 本站页面（含正在看的原帖，被搜索引擎收录后会命中自己）判定：深抓时跳过——
+  // 正文已在抓帖阶段拿到，深抓纯属重复且易撞登录墙，保留搜索摘要即可
+  function isSameSite(u) {
+    try { return new URL(u, location.href).hostname === location.hostname; } catch (e) { return false; }
   }
 
   // 深抓目标网页正文：再 GET 一次搜索结果 URL，按优先级容器提取可读段落文本。
@@ -1944,6 +2018,8 @@
   }
 
   // 解析阶段1 输出的 {kw, fallback} 关键词对（三层兜底，兼容纯字符串数组）
+  // 注：deep 字段已废弃——深抓目标改由「全部词浅搜后 AI 全局挑选」决定（见 pickGlobal），
+  // 这里仍宽松接收但不再消费，老模型/老缓存输出带 deep 也不会报错。
   function parsePairs(text) {
     const t = String(text || '').trim();
     const normalize = (v) => {
@@ -1953,9 +2029,9 @@
         if (x && typeof x === 'object') {
           const kw = String(x.kw || x.q || '').trim();
           const fb = String(x.fallback || x.g || kw).trim();
-          if (kw) pairs.push({ kw: kw, fallback: fb || kw, deep: x.deep !== false }); // 未标 deep 默认深抓（保守保质量）
+          if (kw) pairs.push({ kw: kw, fallback: fb || kw });
         } else if (typeof x === 'string' && x.trim()) {
-          pairs.push({ kw: x.trim(), fallback: x.trim(), deep: true });
+          pairs.push({ kw: x.trim(), fallback: x.trim() });
         }
       }
       return pairs.length ? pairs : null;
@@ -1993,7 +2069,7 @@
     progress('正在分析帖子、提炼搜索关键词…');
     const planReq = buildRequest(cfg, {
       system: '你是一个搜索规划助手。你的任务是分析论坛内容，提炼用于联网搜索的关键词。',
-      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 数组，每个元素是一个对象，包含三个字段：「kw」是精准搜索词；「fallback」是更泛化的搜索词（用品牌、品类、价格等通用表述，去掉可能不准确或罕见的专有名词）；「deep」是布尔值——true 表示该主题需要引用详细事实、背景、具体过程或数据（如人物经历、产品参数、教程步骤、事件来龙去脉），后续会对结果做网页正文深抓；false 表示只需简单确认/了解（如名词释义、日期、是否存在的快速核对），后续只用搜索摘要即可。请把 deep:true 的条目排在数组前面、deep:false 的排在后面。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接，请把链接指向的项目名/产品名/页面主题也纳入搜索词。\n\n【重要：本次搜索目标是补充帖子以外的外部独立信息】论坛内容本身来自本论坛，帖内的观点、体验、讨论、链接多数只存在于本帖——不要为这类"仅帖内可知"的信息生成搜索词（搜不到也搜回原帖没意义）。只为能从第三方独立来源查证的内容（官方资料、新闻报道、百科、教程等）生成搜索词。\n\n论坛内容：\n' + rawText,
+      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 数组，每个元素是一个对象，包含两个字段：「kw」是精准搜索词；「fallback」是更泛化的搜索词（用品牌、品类、价格等通用表述，去掉可能不准确或罕见的专有名词）。请把最重要、最值得优先了解的条目排在数组前面。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接，请把链接指向的项目名/产品名/页面主题也纳入搜索词。\n\n【重要：本次搜索目标是补充帖子以外的外部独立信息】论坛内容本身来自本论坛，帖内的观点、体验、讨论、链接多数只存在于本帖——不要为这类"仅帖内可知"的信息生成搜索词（搜不到也搜回原帖没意义）。只为能从第三方独立来源查证的内容（官方资料、新闻报道、百科、教程等）生成搜索词。\n\n论坛内容：\n' + rawText,
       images: undefined,
       tools: undefined
     });
@@ -2011,36 +2087,36 @@
     progress('提炼出 ' + pairs.length + ' 组关键词：', 'kw');
     pairs.forEach((p, i) => {
       const fb = (p.fallback && p.fallback !== p.kw) ? ('  ↩泛化：' + p.fallback) : '';
-      const deepTag = p.deep === false ? '（浅查）' : '';
-      progress('  ' + (i + 1) + '. ' + p.kw + fb + deepTag, 'kw');
+      progress('  ' + (i + 1) + '. ' + p.kw + fb, 'kw');
     });
 
-    // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，结果合并）
+    // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，各自独立成一个搜索项）
+    // 本阶段只做浅搜并把条目攒进全局候选池；深抓推迟到全部词搜完，由 AI 一次性跨词挑选（见下方「全局深抓」）
     const BATCH = (Number(cfg.searchBatch) >= 1 ? Math.floor(Number(cfg.searchBatch)) : 3);
     const searchItems = [];
     for (const p of pairs) {
-      const dp = p.deep === false ? 0 : undefined; // 浅查词不深抓，只取摘要
-      searchItems.push({ label: p.kw, query: p.kw, deepK: dp });
+      searchItems.push({ label: p.kw, query: p.kw });
       if (p.fallback && p.fallback !== p.kw) {
-        searchItems.push({ label: p.kw + '（泛化）', query: p.fallback, deepK: dp });
+        searchItems.push({ label: p.kw + '（泛化）', query: p.fallback });
       }
     }
     const totalBatches = Math.ceil(searchItems.length / BATCH);
-    const searchTexts = [];
+    const rows = [];     // 每个搜索项一行：{ label, text（浅搜摘要文本）, keys（该词全部条目 key，顺序同 items） }
+    const candRows = []; // 全局候选池：{ key, label, wordIdx, title, url, snippet }，key='S'+词下标+'-'+条目下标
     for (let i = 0; i < searchItems.length; i += BATCH) {
       const batch = searchItems.slice(i, i + BATCH);
       progress('并行搜索 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.map(b => b.query).join(' | ') + '）…');
       // bing/ddg：脚本用 GM_xmlhttpRequest 直连搜索引擎自己抓（免Key、不依赖中转站）；api：沿用中转站内置 web_search 子请求
       const useClientSearch = cfg.searchEngine !== 'api';
       const tasks = batch.map((item) => useClientSearch
-        ? clientWebSearch(cfg, item.query, (m, tip) => appendLog(m, 'deep', tip), item.deepK) // 深抓汇总行（青色）；浅查词 deepK=0 无此行
+        ? clientWebSearch(cfg, item.query) // 纯浅搜，resolve { text, items }
         : sendRequest(buildRequest(cfg, {
             system: '你是一个联网搜索助手。请对用户给出的关键词执行联网搜索，并把搜索结果的内容整理出来。',
             userContent: item.query,
             images: undefined,
             tools: searchTools(cfg)
           }), () => progress('部分搜索超时/失败，正在自动重试…', 'warn')));
-      // 客户端直搜 resolve 字符串、API 子请求 resolve {text,searched}，统一成后者；单条失败降级为占位文本，不拖垮整批
+      // 客户端直搜 resolve {text,items}、API 子请求 resolve {text,searched}，统一成对象；单条失败降级为占位文本，不拖垮整批
       const ress = await Promise.all(tasks.map((p) => p
         .then((v) => (typeof v === 'string' ? { text: v, searched: true } : v))
         .catch((e) => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
@@ -2048,14 +2124,82 @@
         const ok = r.searched !== false && !/^\(搜索失败/.test(r.text);
         // 成功：tip 挂搜索结果正文；失败：tip 挂失败原因（反爬/超时/HTTP 状态），hover/点击固定可诊断
         progress('  ✓ ' + batch[idx].label + '：' + (ok ? (r.text.length + ' 字') : '失败/无结果'), ok ? 'done' : 'warn', r.text || undefined);
-        searchTexts.push('【关键词：' + batch[idx].label + '】\n' + r.text);
+        const wordIdx = i + idx; // 词下标 = searchItems 数组下标（批内顺序与 batch 一一对应）
+        const keys = [];
+        const items = Array.isArray(r.items) ? r.items : []; // api 源/失败项无结构化条目 → 不进候选池
+        items.forEach((it, j) => {
+          const key = 'S' + wordIdx + '-' + j;
+          keys.push(key);
+          candRows.push({ key: key, label: batch[idx].label, wordIdx: wordIdx, title: it.title || '', url: it.url || '', snippet: it.snippet || '' });
+        });
+        rows.push({ label: batch[idx].label, text: r.text, keys: keys });
       });
     }
 
+    // 全局深抓：收齐全部词的候选后，一次 AI 调用跨词挑选值得看正文的条目 → 逐条深抓 → 按 key 回填。
+    // searchDeepK=0 关闭深抓（纯摘要）；api 源走中转站内置 web_search，拿不到结构化条目，不参与深抓。
+    const deepFallbackK = Math.min(Math.max(Number(cfg.searchDeepK) >= 0 ? Math.floor(Number(cfg.searchDeepK)) : 2, 0), 3);
+    const deepMap = Object.create(null); // key → 深抓到的正文
+    if (deepFallbackK > 0 && candRows.length > 0 && cfg.searchEngine !== 'api') {
+      const deepLog = (m, tip) => appendLog(m, 'deep', tip); // 深抓相关日志走青色，不占用单行状态
+      deepLog('  🧠 AI 从 ' + candRows.length + ' 条候选中挑选值得深抓的…');
+      const picked = await pickGlobal(cfg, candRows, searchItems.length);
+      let targets;
+      if (!picked) {
+        // 挑选重试穷尽仍失败 → 回退每词前 K 条（保持「searchDeepK = 每词兜底深抓条数」的语义）
+        targets = [];
+        rows.forEach((row) => { targets = targets.concat(row.keys.slice(0, deepFallbackK)); });
+        deepLog('  🧠 挑选失败（含重试），回退每词前 ' + deepFallbackK + ' 条');
+      } else if (!picked.length) {
+        targets = [];
+        deepLog('  🧠 AI 判定无需深抓');
+      } else {
+        targets = picked;
+        deepLog('  🧠 AI 从 ' + candRows.length + ' 条中选定 ' + picked.length + ' 条深抓');
+      }
+      // 逐条串行深抓（避免对目标站并发触发反爬）；失败/跳过的条目保留其搜索摘要，不影响该词其余结果
+      const byKey = Object.create(null);
+      candRows.forEach((c) => { byKey[c.key] = c; });
+      const steps = []; // { key, title, url, ok, skip, info, text }
+      for (const key of targets) {
+        const c = byKey[key];
+        if (!c) continue;
+        if (isSameSite(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true }); continue; }
+        try {
+          const txt = await fetchPageText(c.url, 12);
+          deepMap[key] = txt;
+          steps.push({ key: key, title: c.title, url: c.url, ok: true, text: txt });
+        } catch (e) {
+          steps.push({ key: key, title: c.title, url: c.url, ok: false, info: (e && e.message) || '失败' });
+        }
+      }
+      // 深抓过程不逐条刷视奸窗（太杂），完成后只落一行汇总，tip 挂全部明细（hover/点击固定可看正文全文）
+      if (steps.length) {
+        const okN = steps.filter((s) => s.ok).length;
+        const badN = steps.filter((s) => !s.ok && !s.skip).length;
+        const skipN = steps.filter((s) => s.skip).length;
+        const detail = steps.map((s, k) => {
+          const st = s.ok ? ('✅正文 ' + s.text.length + ' 字') : (s.skip ? '⏭ 本站页面跳过' : ('❌' + (s.info || '失败') + '（保留摘要）'));
+          return '[' + (k + 1) + '] ' + (s.title || '') + ' ' + st + '\n@' + s.key + '  链接：' + s.url + (s.text ? ('\n\n' + s.text) : '');
+        }).join('\n\n');
+        deepLog('  🕳 深抓完成：成功 ' + okN + ' · 失败 ' + badN + ' · 跳过 ' + skipN + '（点开看明细）', '深抓明细：\n\n' + detail);
+      }
+    }
+
+    // 回填组装：每词文本 = 该词浅搜摘要文本 + 该词被深抓条目的正文段（未深抓/深抓失败的条目保留原摘要）
+    const searchTexts = rows.map((row) => {
+      let s = '【关键词：' + row.label + '】\n' + row.text;
+      row.keys.forEach((key) => {
+        const body = deepMap[key];
+        if (body) s += '\n\n[页面正文 ' + body.length + ' 字 @' + key + '] ' + body;
+      });
+      return s;
+    });
+
     // 阶段4：汇总生成（不带搜索工具，附上下文约束纠错指导）
     progress('搜索完成，正在汇总生成回帖…');
-    // 汇总护栏：单条深抓上限 4000（fetchPageText）已控制单词体量，这里再按总字数截断，
-    // 防止「多关键词 × 各深抓 2 条」把上下文撑爆；靠前关键词的搜索结果优先保留
+    // 汇总护栏：单条深抓上限 4000（fetchPageText）+ 全局挑选上限 10 条已控制体量，这里再按总字数截断兜底，
+    // 防止候选多/回退兜底时把上下文撑爆；靠前关键词的搜索结果优先保留
     const SEARCH_SUMMARY_LIMIT = 16000;
     const rawSearchBlock = searchTexts.join('\n\n');
     const clippedSearch = rawSearchBlock.length > SEARCH_SUMMARY_LIMIT
@@ -2092,10 +2236,8 @@
   function clearLog() {
     logIdx = 0;
     if (logBodyEl) logBodyEl.textContent = '';
-    const tip = document.querySelector('.lsb-ai-log-tip'); // 清空时收起可能残留的 hover 浮层
-    if (tip) tip.style.display = 'none';
-    const pinned = logBodyEl && logBodyEl.querySelector('.lsb-ai-log-line.pinned-tip'); // 同步清掉"已固定"详情
-    if (pinned) pinned.remove();
+    hideLogPreview(); // 清空时收起可能残留的 hover 预览
+    closeLogDetail(); // 同步关掉可能开着的详情弹窗
   }
   function showLog(on) {
     if (!logWrapEl) return;
@@ -2106,13 +2248,19 @@
     if (!logBodyEl) return true;
     return logBodyEl.scrollTop + logBodyEl.clientHeight >= logBodyEl.scrollHeight - 24;
   }
-  // 追加一行；tip 可选：传入后该行 hover 时用浮层显示详情（如搜索结果正文）
+  // 追加一行；tip 可选：该行 hover 出轻预览、点击开详情弹窗（如搜索结果全文/深抓明细）
   function appendLog(msg, kind, tip) {
     if (!logBodyEl) return;
     logIdx += 1;
     const line = document.createElement('div');
     line.className = 'lsb-ai-log-line' + (kind ? ' lsb-' + kind : '');
-    if (typeof tip === 'string' && tip.trim()) line.setAttribute('data-tip', tip);
+    if (typeof tip === 'string' && tip.trim()) {
+      line.setAttribute('data-tip', tip);
+      const more = document.createElement('span'); // 行尾「详情」角标，提示可点开
+      more.className = 'lsb-ai-log-more';
+      more.textContent = '详情';
+      line.appendChild(more);
+    }
     const idx = document.createElement('span');
     idx.className = 'lsb-ai-log-idx';
     idx.textContent = String(logIdx).padStart(2, '0');
@@ -2126,6 +2274,217 @@
   function reportProgress(msg, kind, tip) {
     setStatus(msg, 'loading');
     appendLog(msg, kind, tip);
+  }
+
+  /* ===== 视奸窗详情交互（两级：hover 轻预览 + 点击详情弹窗） ===== */
+
+  // 把详情文本渲染成节点：URL 变可点击链接（createElement 构造，不用 innerHTML）。
+  // 深抓明细（含 [页面正文] 段的多条目格式）改走结构化渲染：每条一个可折叠块
+  function renderTipContent(text) {
+    if (text.indexOf('[页面正文') >= 0 || text.indexOf('深抓明细') >= 0) {
+      return renderDeepDetail(text);
+    }
+    const wrap = document.createElement('div');
+    return appendTextWithLinks(wrap, text);
+  }
+
+  // 纯文本 + URL 链接化（http/https），复制走的仍是原始纯文本
+  function appendTextWithLinks(node, text) {
+    const RE = /https?:\/\/[^\s，。；、）)】\]"'」』]+/g;
+    let last = 0; let m;
+    while ((m = RE.exec(text)) !== null) {
+      if (m.index > last) node.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const a = document.createElement('a');
+      a.href = m[0];
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = m[0];
+      node.appendChild(a);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) node.appendChild(document.createTextNode(text.slice(last)));
+    return node;
+  }
+
+  // 深抓明细结构化渲染：按「[n] …」行拆块，每块一个可折叠卡片（状态行带 ✅/❌/⏭）
+  function renderDeepDetail(text) {
+    const wrap = document.createElement('div');
+    const lines = text.split('\n');
+    let cur = null; // 当前条目块的子行缓冲
+    let headM = null;
+    const HEAD = /^\[(\d+)\]\s*(.*)$/; // [1] 标题 ✅正文 N 字
+    const flush = () => {
+      if (!headM) return; // 首块之前的行（如「深抓明细：」标题）直接丢弃，不渲染
+      const item = document.createElement('div');
+      item.className = 'lsb-ai-deep-item';
+      const head = document.createElement('div');
+      head.className = 'lsb-ai-deep-item-head';
+      const arrow = document.createElement('span');
+      arrow.className = 'lsb-ai-deep-arrow';
+      arrow.textContent = '▸';
+      head.appendChild(arrow);
+      const st = document.createElement('span');
+      const sm = headM[2].match(/(✅|❌|⏭)(.*)$/);
+      if (sm) {
+        st.className = 'lsb-ai-deep-status ' + (sm[1] === '✅' ? 'ok' : (sm[1] === '❌' ? 'bad' : 'skip'));
+        st.textContent = sm[1] + (sm[2] || '').trim().split('（')[0].trim();
+      } else {
+        st.className = 'lsb-ai-deep-status';
+        st.textContent = headM[2].trim().slice(0, 30);
+      }
+      head.appendChild(st);
+      const title = document.createElement('span');
+      title.className = 'lsb-ai-deep-title';
+      title.textContent = (sm ? headM[2].slice(0, sm.index).trim() : headM[2].trim());
+      title.title = title.textContent;
+      head.appendChild(title);
+      head.addEventListener('click', () => item.classList.toggle('open'));
+      item.appendChild(head);
+      const body = document.createElement('div');
+      body.className = 'lsb-ai-deep-item-body';
+      appendTextWithLinks(body, (cur || []).join('\n').trim());
+      item.appendChild(body);
+      wrap.appendChild(item);
+      cur = null; headM = null;
+    };
+    for (const ln of lines) {
+      const h = ln.match(HEAD);
+      if (h) { flush(); headM = h; cur = []; continue; }
+      if (headM) cur.push(ln);
+    }
+    flush();
+    if (!wrap.childNodes.length) { appendTextWithLinks(wrap, text); } // 兜底：格式对不上就按纯文本+链接渲染
+    return wrap;
+  }
+
+  /* ----- hover 轻预览：延迟 180ms 出现、锚定行（不跟鼠标）、可移入交互 ----- */
+  let logPreviewEl = null;
+  let logPreviewTimer = null;
+  let logPreviewHideTimer = null;
+  let logPreviewFor = null; // 当前预览对应的行（node 引用）
+
+  function hideLogPreview() {
+    if (logPreviewTimer) { clearTimeout(logPreviewTimer); logPreviewTimer = null; }
+    if (logPreviewHideTimer) { clearTimeout(logPreviewHideTimer); logPreviewHideTimer = null; }
+    if (logPreviewEl) logPreviewEl.style.display = 'none';
+    logPreviewFor = null;
+  }
+  // 延迟收起：给鼠标留 120ms 穿越间隙（从行移到预览浮层上），中途移回则取消
+  function scheduleHideLogPreview() {
+    if (logPreviewHideTimer) return;
+    logPreviewHideTimer = setTimeout(() => { logPreviewHideTimer = null; hideLogPreview(); }, 120);
+  }
+  function scheduleLogPreview(line) {
+    if (logPreviewHideTimer) { clearTimeout(logPreviewHideTimer); logPreviewHideTimer = null; } // 移回取消收起
+    if (logPreviewFor === line) return; // 已在预览本行
+    if (logPreviewTimer) clearTimeout(logPreviewTimer);
+    logPreviewTimer = setTimeout(() => {
+      logPreviewTimer = null;
+      showLogPreview(line);
+    }, 180);
+  }
+  function showLogPreview(line) {
+    const tipText = line.getAttribute('data-tip');
+    if (!tipText || !tipText.trim()) return;
+    if (!logPreviewEl) {
+      logPreviewEl = document.createElement('div');
+      logPreviewEl.className = 'lsb-ai-log-tip';
+      document.body.appendChild(logPreviewEl);
+      // 预览自身可交互：移入即取消收起，离开才收起（与旧版 pointer-events:none 的区别）
+      logPreviewEl.addEventListener('mouseover', () => { if (logPreviewHideTimer) { clearTimeout(logPreviewHideTimer); logPreviewHideTimer = null; } });
+      logPreviewEl.addEventListener('mouseleave', scheduleHideLogPreview);
+      // 预览内点击不冒泡触发外层（避免点链接时误开详情弹窗）
+      logPreviewEl.addEventListener('click', (e) => { e.stopPropagation(); });
+    }
+    logPreviewEl.textContent = '';
+    logPreviewEl.appendChild(renderTipContent(tipText));
+    logPreviewEl.style.display = 'block';
+    logPreviewFor = line;
+    // 锚定行：预览出现在行的左下方，随行定位（不跟鼠标）；放不下再翻到上方/左侧
+    const r = line.getBoundingClientRect();
+    const pw = Math.min(480, window.innerWidth - 24);
+    let left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
+    let top = r.bottom + 6;
+    const ph = logPreviewEl.getBoundingClientRect().height;
+    if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+    logPreviewEl.style.left = left + 'px';
+    logPreviewEl.style.top = top + 'px';
+  }
+
+  /* ----- 详情弹窗：复用 .lsb-ai-modal 遮罩，长文细读 / 复制全文 ----- */
+  let logDetailEl = null;
+  let logDetailText = null; // 当前弹窗内容对应的原始纯文本（复制按钮的目标）
+  function closeLogDetail() {
+    if (logDetailEl) logDetailEl.classList.add('lsb-hidden');
+  }
+  function openLogDetail(line) {
+    const tipText = line.getAttribute('data-tip');
+    if (!tipText || !tipText.trim()) return;
+    if (!logDetailEl) {
+      logDetailEl = document.createElement('div');
+      logDetailEl.className = 'lsb-ai-modal lsb-hidden';
+      const box = document.createElement('div');
+      box.className = 'lsb-ai-log-modal-box';
+      const head = document.createElement('div');
+      head.className = 'lsb-ai-log-modal-head';
+      const title = document.createElement('span');
+      title.className = 'lsb-ai-log-modal-title';
+      title.textContent = '详情';
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'lsb-ai-log-modal-copy';
+      copyBtn.textContent = '📋 复制全文';
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'lsb-ai-log-modal-close';
+      closeBtn.textContent = '✕';
+      head.appendChild(title); head.appendChild(copyBtn); head.appendChild(closeBtn);
+      const body = document.createElement('div');
+      body.className = 'lsb-ai-log-modal-body';
+      box.appendChild(head); box.appendChild(body);
+      logDetailEl.appendChild(box);
+      document.body.appendChild(logDetailEl);
+      closeBtn.addEventListener('click', closeLogDetail);
+      copyBtn.addEventListener('click', () => copyTextToClipboard(logDetailText, copyBtn));
+      // 点遮罩空白处关闭（与提示词弹窗一致），点内容区不关
+      logDetailEl.addEventListener('click', (e) => { if (e.target === logDetailEl) closeLogDetail(); });
+    }
+    // 更新标题/正文/复制目标
+    const title = logDetailEl.querySelector('.lsb-ai-log-modal-title');
+    title.textContent = (line.textContent || '').replace(/\s*详情$/, '').trim().slice(0, 120) || '详情';
+    const body = logDetailEl.querySelector('.lsb-ai-log-modal-body');
+    body.textContent = '';
+    body.appendChild(renderTipContent(tipText));
+    body.scrollTop = 0;
+    logDetailText = tipText;
+    const copyBtn = logDetailEl.querySelector('.lsb-ai-log-modal-copy');
+    copyBtn.classList.remove('copied');
+    copyBtn.textContent = '📋 复制全文';
+    logDetailEl.classList.remove('lsb-hidden');
+  }
+
+  // 复制到剪贴板：优先 navigator.clipboard（https/localhost），失败退回 execCommand
+  function copyTextToClipboard(text, btn) {
+    const done = () => {
+      btn.classList.add('copied');
+      btn.textContent = '✅ 已复制';
+      setTimeout(() => { btn.classList.remove('copied'); btn.textContent = '📋 复制全文'; }, 1600);
+    };
+    const fallback = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+        document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        if (ok) done(); else setStatus('复制失败，请手动选中复制', 'error');
+      } catch (e) { setStatus('复制失败，请手动选中复制', 'error'); }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+    } else fallback();
   }
 
   function setGenerating(on) {
@@ -2723,83 +3082,28 @@
       logWrapEl.classList.toggle('collapsed');
     });
 
-    // 视奸窗 hover 浮层：悬停在带 data-tip 的行上显示详情（搜索结果正文），随鼠标移动，离开隐藏
-    let logTipEl = null;
-    let logTipVisible = false;
-    const hideLogTip = () => { logTipVisible = false; if (logTipEl) logTipEl.style.display = 'none'; };
-    const placeLogTip = (clientX, clientY) => {
-      if (!logTipEl || !logTipVisible) return;
-      const pad = 14;
-      let left = clientX + pad;
-      let top = clientY + pad;
-      const r = logTipEl.getBoundingClientRect();
-      if (left + r.width > window.innerWidth - 8) left = Math.max(8, clientX - r.width - pad);
-      if (top + r.height > window.innerHeight - 8) top = Math.max(8, clientY - r.height - pad);
-      logTipEl.style.left = left + 'px';
-      logTipEl.style.top = top + 'px';
-    };
-    const showLogTip = (text, clientX, clientY) => {
-      if (!logTipEl) {
-        logTipEl = document.createElement('div');
-        logTipEl.className = 'lsb-ai-log-tip';
-        document.body.appendChild(logTipEl);
-      }
-      logTipEl.textContent = text;
-      logTipEl.style.display = 'block';
-      logTipVisible = true;
-      placeLogTip(clientX, clientY);
-    };
+    // 视奸窗详情交互：hover 延迟出「轻预览」（锚定行、可移入滚动/选中/点链接），点击行开「详情弹窗」细读
     logBodyEl.addEventListener('mouseover', (e) => {
-      const t = e.target;
-      const line = (t && t.closest) ? t.closest('.lsb-ai-log-line[data-tip]') : null;
-      if (line) showLogTip(line.getAttribute('data-tip'), e.clientX, e.clientY);
+      const line = (e.target.closest && e.target.closest('.lsb-ai-log-line[data-tip]')) || null;
+      if (line) scheduleLogPreview(line);
     });
-    logBodyEl.addEventListener('mousemove', (e) => {
-      if (logTipVisible) placeLogTip(e.clientX, e.clientY);
-    });
-    logBodyEl.addEventListener('mouseleave', hideLogTip);
-    logBodyEl.addEventListener('scroll', () => { if (logTipVisible) hideLogTip(); }); // 滚动时收起浮层防错位
-
-    // 视奸窗点击固定：点带 data-tip 的行 → 在该行下方插入常驻详情块，再点同一行/点关闭 → 取消
-    let pinnedTipLine = null;
-    const removePinnedTip = () => {
-      const p = logBodyEl && logBodyEl.querySelector('.lsb-ai-log-line.pinned-tip');
-      if (p) p.remove();
-      pinnedTipLine = null;
-    };
-    const showPinnedTip = (line) => {
-      const tipText = line.getAttribute('data-tip');
-      if (!tipText) return;
-      removePinnedTip();
-      const div = document.createElement('div');
-      div.className = 'lsb-ai-log-line pinned-tip';
-      const head = document.createElement('div');
-      head.className = 'lsb-ai-log-pin-head';
-      head.appendChild(document.createTextNode('📌 已固定（搜索结果全文，可滚动查看）'));
-      const close = document.createElement('span');
-      close.className = 'lsb-ai-log-pin-close';
-      close.textContent = '✕ 收起';
-      close.addEventListener('click', (e) => { e.stopPropagation(); removePinnedTip(); });
-      head.appendChild(close);
-      div.appendChild(head);
-      const body = document.createElement('div');
-      body.textContent = tipText;
-      div.appendChild(body);
-      // 阻止详情块内部点击冒泡到外层行的 toggle 逻辑
-      div.addEventListener('click', (e) => { e.stopPropagation(); });
-      line.insertAdjacentElement('afterend', div);
-      pinnedTipLine = line;
-    };
-    logBodyEl.addEventListener('click', (e) => {
-      // 忽略详情块内部（关闭按钮已 stopPropagation）
-      if (e.target.closest && e.target.closest('.lsb-ai-log-line.pinned-tip')) return;
+    logBodyEl.addEventListener('mouseout', (e) => {
       const line = e.target.closest && e.target.closest('.lsb-ai-log-line[data-tip]');
       if (!line) return;
-      if (pinnedTipLine === line) removePinnedTip();
-      else showPinnedTip(line);
+      if (e.relatedTarget && line.contains(e.relatedTarget)) return; // 行内子元素间移动，不算离开
+      scheduleHideLogPreview();
     });
-    // ESC 收起已固定的详情
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') removePinnedTip(); });
+    logBodyEl.addEventListener('scroll', hideLogPreview); // 日志区滚动会使锚定行位移，直接收起防错位
+    logBodyEl.addEventListener('click', (e) => {
+      const line = e.target.closest && e.target.closest('.lsb-ai-log-line[data-tip]');
+      if (!line) return;
+      hideLogPreview();
+      openLogDetail(line);
+    });
+    // ESC 统一收起：轻预览 + 详情弹窗
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { hideLogPreview(); closeLogDetail(); }
+    });
 
     fab = document.createElement('button');
     fab.id = FAB_ID;
