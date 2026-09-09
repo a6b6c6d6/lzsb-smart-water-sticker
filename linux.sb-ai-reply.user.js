@@ -1842,6 +1842,12 @@
         onload: (resp) => {
           if (!(resp.status >= 200 && resp.status < 300)) { reject(new Error('HTTP ' + resp.status)); return; }
           const rawHtml = resp.responseText || '';
+          // WAF 反爬壳识别：雪球 _waf_*、网宿 acw_sc__v2 等返回的是混淆 JS（写 cookie 挑战），
+          // 不是正文——直接判失败降级摘要，避免把加密串当正文（假成功更误导）
+          if (/["']?(_waf_[a-zA-Z0-9]{4,}|acw_sc__v2|_AspNetCore\.Antiforgery)["']?\s*[:=]/.test(rawHtml) && !/<html[\s>]/i.test(rawHtml.slice(0, 2000))) {
+            reject(new Error('WAF 反爬拦截（挑战壳），保留摘要'));
+            return;
+          }
           // SSR 内嵌 JSON 提取优先（知乎/头条/Next.js 等 JS 渲染站）
           if (isZhihu || isToutiao) {
             const ssr = extractSsrLongest(rawHtml);
