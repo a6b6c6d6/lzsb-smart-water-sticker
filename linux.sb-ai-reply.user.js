@@ -110,7 +110,8 @@
     includeSpeaker: true,
     enableImage: true, // 多模态：抓取正文图片一起喂给模型（需模型支持视觉）
     enableSearch: false, // 联网搜索总开关
-    searchEngine: 'bing', // 搜索执行方式：'bing'/'ddg'=脚本直连搜索引擎（免Key、不依赖中转站）；'api'=中转站内置 web_search 工具（原方式）
+    searchEngine: 'bing', // 搜索执行方式：'bing'/'ddg'/'searx'=脚本直连搜索引擎（免Key、不依赖中转站）；'api'=中转站内置 web_search 工具（原方式）
+    searchSearxInstance: '', // SearXNG 自填实例地址（如 https://searx.be）；留空用内置轮换池
     searchTopK: 8, // 客户端直搜时，每个关键词取前 N 条结果（宽进：候选池大，AI 全局挑选再决定深抓哪些）
     searchDeepK: 2, // 深抓正文：对前 N 条结果再抓一次目标网页正文（0=关闭，仅用搜索引擎摘要；1-3 控制条数）
     searchBatch: 3, // 联网搜索并行批大小（每批同时发几个搜索子请求）
@@ -662,7 +663,8 @@
     if (!(cfg.searchTopK >= 1)) cfg.searchTopK = DEFAULTS.searchTopK;
     cfg.searchDeepK = Number(cfg.searchDeepK);
     if (!(cfg.searchDeepK >= 0 && cfg.searchDeepK <= 3)) cfg.searchDeepK = DEFAULTS.searchDeepK;
-    if (!['bing', 'ddg', 'searx', 'mojeek', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
+    if (!['bing', 'ddg', 'searx', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
+    cfg.searchSearxInstance = String(cfg.searchSearxInstance || '').trim();
     if (!(cfg.requestTimeout >= 5)) cfg.requestTimeout = DEFAULTS.requestTimeout;
     if (!(cfg.maxRetry >= 0)) cfg.maxRetry = DEFAULTS.maxRetry;
     if (!['responses', 'chat', 'anthropic'].includes(cfg.apiFormat)) cfg.apiFormat = 'responses';
@@ -1604,31 +1606,12 @@
         return out.slice(0, k);
       }
     },
-    // SearXNG：多引擎聚合、JSON 结构化结果（无品牌霸屏、摘要完整）。公共实例偶发抽风/限流，
-    // 用多实例自动轮换：clientWebSearch 依次尝试，成功实例提到队首（下次优先），全失败才报错。
+    // SearXNG：多引擎聚合、JSON 结构化结果（无品牌霸屏、摘要完整）。公共实例生态不稳（常禁 JSON/下线），
+    // 内置池自动轮换 + 设置里可自填实例地址优先使用；全失败报错含各实例具体原因便于换源。
     searx: {
       json: true,
       label: 'SearXNG（多实例轮换）',
       buildUrl: (q, base) => base + '/search?q=' + encodeURIComponent(q) + '&format=json'
-    },
-    // Mojeek：独立爬虫索引，无广告污染；英文技术查询不错、中文收录弱。偶发 JS challenge。
-    mojeek: {
-      label: 'Mojeek（独立索引）',
-      buildUrl: (q) => 'https://www.mojeek.com/search?q=' + encodeURIComponent(q),
-      parse: (doc, k) => {
-        const out = [];
-        const grab = (scope) => {
-          const a = scope.querySelector('h2 a');
-          if (!a || !a.href) return;
-          const s = scope.querySelector('.s, .snippet, p');
-          out.push({ title: (a.textContent || '').trim(), url: a.href, snippet: s ? (s.textContent || '').trim() : '' });
-        };
-        // 新老结构容器都试：旧版 ul.results-standard > li；宽松退路：h2 a 平铺
-        const boxes = doc.querySelectorAll('ul.results-standard > li, ul.results > li, li.result');
-        if (boxes.length) boxes.forEach(grab);
-        else doc.querySelectorAll('h2 a').forEach((a) => { out.push({ title: (a.textContent || '').trim(), url: a.href, snippet: '' }); });
-        return out.slice(0, k);
-      }
     }
   };
   // SearXNG 公共实例池（内存轮换序：成功实例被提到队首）
@@ -1753,14 +1736,18 @@
 
   // 执行一次客户端直搜（纯浅搜，不再内嵌深抓）：resolve { text, items }，
   // 由阶段3 收齐所有词的条目后统一做「AI 全局挑选 → 深抓」。失败 reject，单条失败不拖垮整批。
-  // HTML 引擎（bing/ddg/mojeek）单实例；JSON 引擎（searx）自动轮换公共实例：非 2xx/解析失败/结果为空
-  // 依次尝试下一个，成功实例提到队首（下次优先），全部失败才 reject。
+  // HTML 引擎（bing/ddg）单实例；JSON 引擎（searx）自动轮换实例：非 2xx/解析失败/结果为空依次尝试下一个，
+  // 成功实例提到队首（下次优先），全部失败才 reject（错误信息带各实例具体原因，便于换源诊断）。
   function clientWebSearch(cfg, query) {
     const engineName = CLIENT_SEARCH_ENGINES[cfg.searchEngine] ? cfg.searchEngine : 'bing';
     const engine = CLIENT_SEARCH_ENGINES[engineName];
     const topK = (Number(cfg.searchTopK) >= 1 ? Math.floor(Number(cfg.searchTopK)) : 6);
     const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 30); // 搜索是快请求，封顶 30s
-    const attemptBases = engine.json ? searxOrder.slice() : [null];
+    // 实例尝试顺序：searx 时 = [自定义实例(若填)] + 内置轮换池；HTML 引擎 = 单个
+    const customInst = (cfg.searchSearxInstance || '').trim();
+    const attemptBases = engine.json
+      ? (customInst ? [customInst].concat(searxOrder.filter((x) => x !== customInst)) : searxOrder.slice())
+      : [null];
     const finish = (items, resolve, reject) => {
       if (!items.length) { reject(new Error('无结果（可能被搜索引擎反爬拦截，可换搜索源重试）')); return; }
       const text = items.map((it, i) => {
@@ -1770,19 +1757,21 @@
       resolve({ text: text, items: items, searched: true });
     };
     return new Promise((resolve, reject) => {
+      const errLogs = []; // 各实例失败原因，拼进最终报错便于判断是网络/HTTP/空结果
       const tryAt = (i) => {
         if (i >= attemptBases.length) {
-          reject(new Error('搜索失败：' + engineName + ' 的可用源均不可用（网络/限流/反爬），可换搜索源重试'));
+          reject(new Error('搜索失败：' + engineName + ' 源不可用[' + (errLogs.join('；') || '未知') + ']，可换搜索源重试'));
           return;
         }
         const base = attemptBases[i];
+        const tag = engine.json ? (base || '').replace(/^https?:\/\//, '').split('/')[0] : engineName;
         gmRequest({
           method: 'GET',
           url: engine.json ? engine.buildUrl(query, base) : engine.buildUrl(query),
           timeout: timeoutSec * 1000,
           headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }, // 不覆盖 User-Agent：扩展层用真实浏览器 UA，且该头属受限头
           onload: (resp) => {
-            if (!(resp.status >= 200 && resp.status < 300)) { tryAt(i + 1); return; }
+            if (!(resp.status >= 200 && resp.status < 300)) { errLogs.push(tag + ':HTTP' + resp.status); tryAt(i + 1); return; }
             const raw = resp.responseText || '';
             let items = [];
             if (engine.json) {
@@ -1790,23 +1779,22 @@
                 const j = JSON.parse(raw);
                 const arr = Array.isArray(j.results) ? j.results : [];
                 items = arr.filter((r) => r && r.url).map((r) => ({ title: (r.title || '').trim(), url: r.url, snippet: (r.content || r.snippet || '').trim() }));
-              } catch (e) { tryAt(i + 1); return; }
-              if (!items.length) { tryAt(i + 1); return; } // 实例返回空/反爬壳 → 换下一个
-              // 成功：把该实例提到轮换队首，下次优先
-              if (attemptBases.length > 1) {
-                const cur = searxOrder.indexOf(base);
-                if (cur > 0) { searxOrder.splice(cur, 1); searxOrder.unshift(base); }
-              }
+              } catch (e) { errLogs.push(tag + ':响应非JSON'); tryAt(i + 1); return; }
+              if (!items.length) { errLogs.push(tag + ':空结果'); tryAt(i + 1); return; } // 实例返回空/反爬壳 → 换下一个
+              // 成功：把该实例提到内置轮换池队首，下次优先（自定义实例不进池）
+              const cur = searxOrder.indexOf(base);
+              if (cur > 0) { searxOrder.splice(cur, 1); searxOrder.unshift(base); }
             } else {
               try {
                 const doc = new DOMParser().parseFromString(raw, 'text/html');
                 items = engine.parse(doc, topK);
               } catch (e) { reject(new Error('解析搜索结果失败：' + (e.message || e))); return; }
+              if (!items.length) { reject(new Error('无结果（可能被搜索引擎反爬拦截，可换搜索源重试）')); return; }
             }
             finish(items.slice(0, topK), resolve, reject);
           },
-          onerror: () => tryAt(i + 1),
-          ontimeout: () => tryAt(i + 1),
+          onerror: () => { errLogs.push(tag + ':网络错误'); tryAt(i + 1); },
+          ontimeout: () => { errLogs.push(tag + ':超时'); tryAt(i + 1); },
           onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消'))
         });
       };
@@ -2756,6 +2744,7 @@
       enableImage: $('enableImage').checked,
       enableSearch: $('enableSearch').checked,
       searchEngine: ($('searchEngine') && $('searchEngine').value) || 'bing',
+      searchSearxInstance: ($('searchSearxInstance') ? String($('searchSearxInstance').value || '') : '').trim(),
       searchTopK: Math.max(1, num('searchTopK', DEFAULTS.searchTopK)),
       searchDeepK: Math.max(0, Math.min(3, num('searchDeepK', DEFAULTS.searchDeepK)))
     };
@@ -2779,6 +2768,7 @@
     $('enableImage').checked = !!cfg.enableImage;
     $('enableSearch').checked = !!cfg.enableSearch;
     if ($('searchEngine')) $('searchEngine').value = cfg.searchEngine;
+    if ($('searchSearxInstance')) $('searchSearxInstance').value = cfg.searchSearxInstance || '';
   }
 
   // ===== 中转站预设 =====
@@ -3246,10 +3236,13 @@
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
                 <option value="bing">Bing 直连（推荐·免Key·脚本自己搜）</option>
                 <option value="ddg">DuckDuckGo 直连（备用·连续请求易被限流）</option>
-                <option value="searx">SearXNG 多实例轮换（JSON·结果干净·实例偶抽风自动切换）</option>
-                <option value="mojeek">Mojeek 直连（独立索引·英文技术向·中文收录弱）</option>
+                <option value="searx">SearXNG 多实例轮换（JSON·干净·可自填实例）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
               </select>
+            </div>
+            <div class="lsb-ai-row">
+              <label class="lsb-ai-label">SearXNG 自填实例（选 searx 时生效·留空用内置轮换池）</label>
+              <input class="lsb-ai-input" id="lsb-ai-cfg-searchSearxInstance" type="text" placeholder="https://searx.be（填到域名即可，勿带 /search）" autocomplete="off">
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">每词取结果条数（客户端直搜 1-20，宽进候选池供 AI 挑选）</label>
