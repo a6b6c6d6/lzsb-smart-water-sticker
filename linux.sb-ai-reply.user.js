@@ -111,7 +111,7 @@
     enableImage: true, // 多模态：抓取正文图片一起喂给模型（需模型支持视觉）
     enableSearch: false, // 联网搜索总开关
     searchEngine: 'bing', // 搜索执行方式：'bing'/'ddg'=脚本直连搜索引擎（免Key、不依赖中转站）；'api'=中转站内置 web_search 工具（原方式）
-    searchTopK: 6, // 客户端直搜时，每个关键词取前 N 条结果
+    searchTopK: 8, // 客户端直搜时，每个关键词取前 N 条结果（宽进：候选池大，AI 全局挑选再决定深抓哪些）
     searchDeepK: 2, // 深抓正文：对前 N 条结果再抓一次目标网页正文（0=关闭，仅用搜索引擎摘要；1-3 控制条数）
     searchBatch: 3, // 联网搜索并行批大小（每批同时发几个搜索子请求）
     requestTimeout: 180, // 单次请求超时（秒）
@@ -307,18 +307,6 @@
       padding: 0 3px; border-radius: 4px; font-size: 10px;
     }
     .lsb-ai-log-more:hover { background: rgba(37, 99, 235, .12); }
-    /* 视奸窗 hover 轻预览：锚定行下方（不跟鼠标、防抖出现），可移入滚动/选中/复制。
-       层级必须高于面板（2147483001），否则会被面板整块盖住（旧版 bug） */
-    .lsb-ai-log-tip {
-      position: fixed; z-index: 2147483005; display: none;
-      width: 480px; max-width: calc(100vw - 24px); max-height: 300px; overflow: auto;
-      background: #ffffff; color: #1e293b;
-      border: 1px solid #cbd5e1; border-radius: 8px;
-      box-shadow: 0 6px 20px rgba(15, 23, 42, .18);
-      padding: 8px 10px; font-size: 12px; line-height: 1.6;
-      white-space: pre-wrap; word-break: break-all;
-    }
-    .lsb-ai-log-tip a { color: #2563eb; text-decoration: underline; word-break: break-all; }
     /* 视奸窗详情弹窗：复用 .lsb-ai-modal 遮罩层，点击行时打开，长文细读/复制在这里 */
     .lsb-ai-log-modal-box {
       width: 640px; max-width: calc(100vw - 32px);
@@ -1587,7 +1575,7 @@
   // 依赖 GM_xmlhttpRequest 跨域（@connect 现为 * 已覆盖；若收紧权限，需放行 cn.bing.com / html.duckduckgo.com）。
   const CLIENT_SEARCH_ENGINES = {
     bing: {
-      buildUrl: (q) => 'https://cn.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=zh-CN&ensearch=0&count=10',
+      buildUrl: (q) => 'https://cn.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=zh-CN&ensearch=0&count=25', // count=25：宽进搜索结果，由 pickGlobal 全局挑选再严出
       parse: (doc, k) => {
         const out = [];
         doc.querySelectorAll('li.b_algo').forEach((li) => {
@@ -1632,6 +1620,12 @@
   }
   // 全局挑选的脚本侧硬上限：AI 超发时截断，避免一次深抓几十页把上下文和耗时撑爆
   const PICK_HARD_LIMIT = 10;
+
+  // 候选 key 'S0-2' → 条目下标 2（词下标丢弃；回填阶段按词内下标找原条目）
+  function keyToIdx(key) {
+    const m = /^S\d+-(\d+)$/.exec(String(key || ''));
+    return m ? Number(m[1]) : -1;
+  }
 
   // 全局挑选：把「全部搜索词 × 全部浅搜条目」做成一份带唯一 key 的清单，一次 AI 调用挑出值得深抓正文的条目。
   // candRows: [{ key, label, wordIdx, title, url, snippet }]，key 形如 'S0-2'（第1个搜索词的第3条）。
@@ -1678,6 +1672,7 @@
         if (r !== null) return r;
         if (i >= MAX_RETRY) return null;
         await delay(1000 * (i + 1));
+        checkStop(); // 退避期间按了停止：不再发下一次挑选请求
       }
     })();
   }
@@ -1693,7 +1688,7 @@
   function fetchPageText(url, timeoutSec) {
     const t = timeoutSec || 12;
     return new Promise((resolve, reject) => {
-      trackXhr(GM_xmlhttpRequest({
+      gmRequest({
         method: 'GET',
         url: url,
         timeout: t * 1000,
@@ -1723,7 +1718,7 @@
         onerror: () => reject(new Error('网络错误')),
         ontimeout: () => reject(new Error('超时(' + t + 's)')),
         onabort: () => reject(stopRequested ? abortError() : new Error('请求中止'))
-      }));
+      });
     });
   }
 
@@ -1735,7 +1730,7 @@
     const topK = (Number(cfg.searchTopK) >= 1 ? Math.floor(Number(cfg.searchTopK)) : 6);
     const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 30); // 搜索是快请求，封顶 30s
     return new Promise((resolve, reject) => {
-      trackXhr(GM_xmlhttpRequest({
+      gmRequest({
         method: 'GET',
         url: engine.buildUrl(query),
         timeout: timeoutSec * 1000,
@@ -1758,7 +1753,7 @@
         onerror: () => reject(new Error('搜索网络错误')),
         ontimeout: () => reject(new Error('搜索超时（' + timeoutSec + 's）')),
         onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消'))
-      }));
+      });
     });
   }
 
@@ -1810,7 +1805,11 @@
   /* ===== 手动停止：标志 + 停止信号（await 可被立即打断）+ 在途流式请求 abort ===== */
   let stopRequested = false;
   let stopSignal = null; // { p, resolve }：生成期间创建，stop 时 resolve，使 stopRace 立即抛 abortError
-  function resetStop() { stopRequested = false; stopSignal = null; }
+  function resetStop() {
+    stopRequested = false;
+    stopSignal = null;
+    activeXhrs.clear(); // 上一轮遗留的句柄（已结束的）不带进新一轮，避免越攒越多
+  }
   function requestStop() {
     stopRequested = true;
     if (stopSignal) stopSignal.resolve();
@@ -1832,7 +1831,22 @@
   // 流程关键点检查：被停止时立刻抛出（各层 catch 识别 e.aborted 正常收尾，不当作错误）
   function checkStop() { if (stopRequested) throw abortError(); }
   const activeXhrs = new Set();
-  function trackXhr(x) { if (x && typeof x.abort === 'function') activeXhrs.add(x); return x; }
+  // 发起一个可被「停止」中止的请求：注册 abort 句柄，并在任一终态回调时注销，
+  // 保证 activeXhrs 只装真正在途的请求（否则一次会话会把所有历史句柄攒到底）
+  function gmRequest(opts) {
+    let handle = null;
+    const wrapped = Object.assign({}, opts);
+    ['onload', 'onerror', 'ontimeout', 'onabort'].forEach((k) => {
+      const orig = opts[k];
+      wrapped[k] = (resp) => {
+        if (handle) activeXhrs.delete(handle);
+        if (typeof orig === 'function') orig(resp);
+      };
+    });
+    handle = GM_xmlhttpRequest(wrapped);
+    if (handle && typeof handle.abort === 'function') activeXhrs.add(handle);
+    return handle;
+  }
 
   // 生成请求参数摘要（不含 apiKey），拼进 4xx 报错，方便定位「源站拒绝参数」类问题（如模型名不匹配/字段不被支持）
   function describeRequest(req) {
@@ -1855,7 +1869,7 @@
   function sendRequestOnce(req) {
     const timeoutMs = req.timeout || 180000;
     return new Promise((resolve, reject) => {
-      trackXhr(GM_xmlhttpRequest({
+      gmRequest({
         method: 'POST',
         url: req.url,
         timeout: timeoutMs,
@@ -1897,7 +1911,7 @@
         onerror: () => { const e = new Error('网络错误，请求未能完成，请检查网络或 Base URL'); e.retriable = true; reject(e); },
         ontimeout: () => { const e = new Error('请求超时（超过 ' + Math.round(timeoutMs / 1000) + ' 秒），请稍后重试'); e.retriable = true; reject(e); },
         onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消')) // 用户取消不重试
-      }));
+      });
     });
   }
 
@@ -1913,6 +1927,7 @@
         const wait = 1000 * (attempt + 1); // 1s、2s
         if (typeof onRetry === 'function') { try { onRetry(attempt + 1, MAX_RETRY, e, wait); } catch (_) { /* 忽略回调异常 */ } }
         await delay(wait);
+        checkStop(); // 退避期间按了停止：别再发下一次（否则会漏出一个无人接收的孤儿请求）
       }
     }
   }
@@ -1972,7 +1987,7 @@
           if (d) { full += d; try { onToken(d); } catch (_) { /* 忽略回调异常 */ } }
         });
       };
-      trackXhr(GM_xmlhttpRequest({
+      gmRequest({
         method: 'POST',
         url: req.url,
         timeout: timeoutMs,
@@ -2017,7 +2032,7 @@
         onerror: () => { const e = new Error('网络错误，请求未能完成，请检查网络或 Base URL'); e.retriable = true; reject(e); },
         ontimeout: () => { const e = new Error('请求超时（超过 ' + Math.round(timeoutMs / 1000) + ' 秒），请稍后重试'); e.retriable = true; reject(e); },
         onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消'))
-      }));
+      });
     });
   }
 
@@ -2033,6 +2048,7 @@
         if (typeof onReset === 'function') { try { onReset(); } catch (_) { /* 忽略 */ } }
         if (typeof onRetry === 'function') { try { onRetry(attempt + 1, MAX_RETRY, e, wait); } catch (_) { /* 忽略 */ } }
         await delay(wait);
+        checkStop(); // 退避期间按了停止：别再发下一次
       }
     }
   }
@@ -2182,7 +2198,7 @@
           keys.push(key);
           candRows.push({ key: key, label: batch[idx].label, wordIdx: wordIdx, title: it.title || '', url: it.url || '', snippet: it.snippet || '' });
         });
-        rows.push({ label: batch[idx].label, text: r.text, keys: keys });
+        rows.push({ label: batch[idx].label, text: r.text, keys: keys, items: items }); // items 存结构化条目，回填阶段按 key 精准重建摘要行
       });
       // 累积进「搜索汇总」单行（原地更新），批多了继续往上加
       sumOk += okCount;
@@ -2248,9 +2264,30 @@
       }
     }
 
-    // 回填组装：每词文本 = 该词浅搜摘要文本 + 该词被深抓条目的正文段（未深抓/深抓失败的条目保留原摘要）
+    // 回填组装：最终上下文「严出」——宽进候选池（topK 可到 20）后，没被深抓的多余条目在此剔除：
+    // 每词只保留 被深抓条目的行 + 前 SUMMARY_KEEP_K 条摘要行（其使命在全局挑选阶段已完成，不必再喂模型）。
+    // 摘要行统一截 150 字（被 AI 判"不值得看正文"的条目给长摘要属浪费；深抓正文才是信息主力）。
+    // 无结构化条目的词（api 源/搜索失败）保持原整段文本，不参与瘦身。
+    const SUMMARY_KEEP_K = 3;
+    const SNIPPET_FINAL_LIMIT = 150;
+    const formatFinalItem = (it, j) => {
+      const sn = (it.snippet || '').length > SNIPPET_FINAL_LIMIT ? it.snippet.slice(0, SNIPPET_FINAL_LIMIT) + '…' : (it.snippet || '');
+      return (j + 1) + '. ' + (it.title || '') + '\n链接：' + (it.url || '') + (sn ? '\n摘要：' + sn : '');
+    };
     const searchTexts = rows.map((row) => {
-      let s = '【关键词：' + row.label + '】\n' + row.text;
+      let base;
+      if (Array.isArray(row.items) && row.items.length) {
+        const keepIdx = Object.create(null); // 本词内要保留的条目下标 → true
+        row.keys.forEach((key) => { if (deepMap[key]) keepIdx[keyToIdx(key)] = true; });
+        for (let j = 0; j < Math.min(SUMMARY_KEEP_K, row.items.length); j++) keepIdx[j] = true;
+        base = row.items
+          .map((it, j) => (keepIdx[j] ? formatFinalItem(it, j) : null))
+          .filter(Boolean)
+          .join('\n');
+      } else {
+        base = row.text; // api 源/失败项：原整段（无条目可挑）
+      }
+      let s = '【关键词：' + row.label + '】\n' + base;
       row.keys.forEach((key) => {
         const body = deepMap[key];
         if (body) s += '\n\n[页面正文 ' + body.length + ' 字 @' + key + '] ' + body;
@@ -2299,8 +2336,8 @@
   function clearLog() {
     logIdx = 0;
     if (logBodyEl) logBodyEl.textContent = '';
-    hideLogPreview(); // 清空时收起可能残留的 hover 预览
-    closeLogDetail(); // 同步关掉可能开着的详情弹窗
+    closeLogDetail(); // 清空时关掉可能开着的详情弹窗
+
     searchSummaryLine = null; // 累积行已随清空失效，下次自动重建
   }
   function showLog(on) {
@@ -2350,7 +2387,22 @@
     const tn = nodes.filter((n) => n.nodeType === 3).pop();
     if (tn) tn.textContent = msg;
     line.className = 'lsb-ai-log-line' + (kind ? ' lsb-' + kind : '');
-    if (typeof tip === 'string' && tip.trim()) line.setAttribute('data-tip', tip);
+    // tip 与「详情」角标保持同步：有 tip 才可点（缺角标就补），tip 没了要把旧的一并撤掉，
+    // 否则会出现「点开是上一轮的旧内容」或「能点却没有角标提示」
+    const hasTip = typeof tip === 'string' && !!tip.trim();
+    const more = line.querySelector('.lsb-ai-log-more');
+    if (hasTip) {
+      line.setAttribute('data-tip', tip);
+      if (!more) {
+        const m = document.createElement('span');
+        m.className = 'lsb-ai-log-more';
+        m.textContent = '详情';
+        line.insertBefore(m, line.firstChild);
+      }
+    } else {
+      line.removeAttribute('data-tip');
+      if (more) more.remove();
+    }
   }
   // 生成期统一进度出口：单行状态（最新）+ 过程窗（累积）
   function reportProgress(msg, kind, tip) {
@@ -2515,10 +2567,6 @@
     if (!wrap.childNodes.length) { appendTextWithLinks(wrap, text); } // 兜底：格式对不上按纯文本+链接
     return wrap;
   }
-
-  /* ----- hover 轻预览已停用（用户选择仅点击弹窗）；保留 hideLogPreview 供 scroll/ESC/clearLog 兜底 ----- */
-  let logPreviewEl = null;
-  function hideLogPreview() { if (logPreviewEl) logPreviewEl.style.display = 'none'; }
 
   /* ----- 详情弹窗：复用 .lsb-ai-modal 遮罩，长文细读 / 复制全文 ----- */
   let logDetailEl = null;
@@ -3130,8 +3178,8 @@
               </select>
             </div>
             <div class="lsb-ai-row">
-              <label class="lsb-ai-label">每词取结果条数（客户端直搜 1-10）</label>
-              <input class="lsb-ai-input" id="lsb-ai-cfg-searchTopK" type="number" min="1" max="10" step="1">
+              <label class="lsb-ai-label">每词取结果条数（客户端直搜 1-20，宽进候选池供 AI 挑选）</label>
+              <input class="lsb-ai-input" id="lsb-ai-cfg-searchTopK" type="number" min="1" max="20" step="1">
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">深抓正文条数（0 关·抓前 N 条网页正文替代空摘要）</label>
@@ -3197,16 +3245,14 @@
     });
 
     // 视奸窗详情交互：去掉 hover 浮层，仅保留「点击行 → 详情弹窗」细读
-    logBodyEl.addEventListener('scroll', hideLogPreview); // 残留预览收起防错位
     logBodyEl.addEventListener('click', (e) => {
       const line = e.target.closest && e.target.closest('.lsb-ai-log-line[data-tip]');
       if (!line) return;
-      hideLogPreview();
       openLogDetail(line);
     });
-    // ESC 统一收起：轻预览 + 详情弹窗
+    // ESC 关闭详情弹窗
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { hideLogPreview(); closeLogDetail(); }
+      if (e.key === 'Escape') closeLogDetail();
     });
 
     fab = document.createElement('button');
@@ -3745,6 +3791,7 @@
       scraped = scrapePosts('first', false, cfg.maxContextChars, false);
     } catch (e) { setStatus(e.message, 'error'); return; }
 
+    resetStop();
     setGenerating(true);
     previewEl.classList.remove('lsb-success');
     previewEl.value = '';
@@ -3780,8 +3827,13 @@
       appendLog('✅ 立场：' + (decision.vote === 'support' ? '支持加精' : '反对加精') + '，理由 ' + decision.reason.length + ' 字', 'done');
       setStatus('已生成【' + (decision.vote === 'support' ? '支持加精' : '反对加精') + '】理由' + searchNote + '，可修改后点「填入投票」；脚本不会自动提交', 'ok');
     } catch (e) {
-      appendLog('❌ ' + (e.message || '生成失败'), 'warn');
-      setStatus(e.message || '生成失败', 'error');
+      if (e && e.aborted) {
+        appendLog('⏹ 已停止生成（未完成内容不会填入）', 'warn');
+        setStatus('已停止生成', 'info');
+      } else {
+        appendLog('❌ ' + (e.message || '生成失败'), 'warn');
+        setStatus(e.message || '生成失败', 'error');
+      }
     } finally {
       setGenerating(false);
     }
