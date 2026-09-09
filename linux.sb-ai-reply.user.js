@@ -1625,10 +1625,10 @@
   const SEARX_INSTANCES = ['https://searx.be', 'https://search.bus-hit.me', 'https://searx.tiekoetter.com', 'https://priv.au'];
   let searxOrder = SEARX_INSTANCES.slice();
 
-  // multi 引擎的子源定义（实测可达：hn.algolia / api.stackexchange / api.github search）
+  // multi 引擎的子源定义（实测可达：hn.algolia / api.stackexchange / api.github / news.google RSS）
   const MULTI_SOURCES = [
     {
-      id: 'so', tag: 'StackOverflow',
+      id: 'so', tag: 'StackOverflow', kind: 'json',
       build: (q) => 'https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&site=stackoverflow&pagesize=5&q=' + encodeURIComponent(q),
       extract: (j) => {
         const items = (j && Array.isArray(j.items)) ? j.items : [];
@@ -1640,7 +1640,7 @@
       }
     },
     {
-      id: 'gh', tag: 'GitHub',
+      id: 'gh', tag: 'GitHub', kind: 'json',
       build: (q) => 'https://api.github.com/search/repositories?q=' + encodeURIComponent(q) + '&sort=stars&per_page=5',
       extract: (j) => {
         const items = (j && Array.isArray(j.items)) ? j.items : [];
@@ -1652,7 +1652,7 @@
       }
     },
     {
-      id: 'hn', tag: 'HackerNews',
+      id: 'hn', tag: 'HackerNews', kind: 'json',
       build: (q) => 'https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(q) + '&tags=story&hitsPerPage=5',
       extract: (j) => {
         const hits = (j && Array.isArray(j.hits)) ? j.hits : [];
@@ -1661,6 +1661,24 @@
           url: it.url || ('https://news.ycombinator.com/item?id=' + it.objectID),
           snippet: (it.points != null ? it.points + ' 分' : '') + (it.num_comments != null ? ' · ' + it.num_comments + ' 评论' : '') + (it.author ? ' · ' + it.author : '')
         }));
+      }
+    },
+    {
+      id: 'news', tag: 'GoogleNews', kind: 'rss',
+      build: (q) => 'https://news.google.com/rss/search?q=' + encodeURIComponent(q) + '&hl=zh-CN&gl=CN&ceid=CN:zh-Hans',
+      extractXml: (xml) => {
+        const doc = new DOMParser().parseFromString(xml, 'application/xml');
+        const out = [];
+        doc.querySelectorAll('item').forEach((it) => {
+          const t = it.querySelector('title');
+          const l = it.querySelector('link');
+          const d = it.querySelector('description');
+          if (!t || !l) return;
+          let desc = (d ? d.textContent || '' : '');
+          desc = desc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+          out.push({ title: t.textContent.trim(), url: l.textContent.trim(), snippet: desc.slice(0, 200) });
+        });
+        return out;
       }
     }
   ];
@@ -1804,9 +1822,11 @@
       resolve({ text: text, items: items, searched: true });
     };
     return new Promise((resolve, reject) => {
-      // multi 引擎：并行请求全部子源（官方 API，限流宽松），合并去重取 topK；
-      // 单源失败忽略（记录原因），全部失败才 reject
+      // multi 引擎：并行请求全部子源（官方 API/RSS，免 Key），合并去重取 topK；
+      // 单源失败忽略（记录原因）。若全部为空（垂直源覆盖不到中文资讯等话题）：
+      // 自动用 Bing 兜底补搜一次——宁要杂结果不要整词失败
       if (engine.multi) {
+        const parseSrc = (src, raw) => (src.kind === 'rss' ? src.extractXml(raw) : src.extract(JSON.parse(raw)));
         const outs = MULTI_SOURCES.map((src) => new Promise((res) => {
           gmRequest({
             method: 'GET',
@@ -1815,8 +1835,8 @@
             headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
             onload: (resp) => {
               if (!(resp.status >= 200 && resp.status < 300)) { res({ src: src, items: [], err: 'HTTP' + resp.status }); return; }
-              try { const j = JSON.parse(resp.responseText || ''); res({ src: src, items: src.extract(j) }); }
-              catch (e) { res({ src: src, items: [], err: '非JSON' }); }
+              try { const items = parseSrc(src, resp.responseText || ''); res({ src: src, items: items || [] }); }
+              catch (e) { res({ src: src, items: [], err: src.kind === 'rss' ? 'RSS解析失败' : '非JSON' }); }
             },
             onerror: () => res({ src: src, items: [], err: '网络错误' }),
             ontimeout: () => res({ src: src, items: [], err: '超时' }),
@@ -1827,7 +1847,24 @@
           const ok = list.filter((o) => o.items.length);
           if (!ok.length) {
             const why = list.map((o) => o.src.id + ':' + (o.err || '空结果')).join('；');
-            reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，可换搜索源重试'));
+            // 兜底：Bing 补一发（垂直源空 ≠ 全网无结果）
+            const bingEngine = CLIENT_SEARCH_ENGINES.bing;
+            gmRequest({
+              method: 'GET',
+              url: bingEngine.buildUrl(query),
+              timeout: timeoutSec * 1000,
+              headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+              onload: (resp2) => {
+                if (!(resp2.status >= 200 && resp2.status < 300)) { reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，Bing 兜底也失败(HTTP' + resp2.status + ')')); return; }
+                let items = [];
+                try { const doc = new DOMParser().parseFromString(resp2.responseText || '', 'text/html'); items = bingEngine.parse(doc, topK); } catch (e) { /* 兜底解析失败 */ }
+                if (!items.length) { reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，Bing 兜底无结果')); return; }
+                finish(items.slice(0, topK), resolve, reject);
+              },
+              onerror: () => reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，Bing 兜底网络错误')),
+              ontimeout: () => reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，Bing 兜底超时')),
+              onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消'))
+            });
             return;
           }
           const seen = Object.create(null);
