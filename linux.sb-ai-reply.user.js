@@ -663,7 +663,7 @@
     if (!(cfg.searchTopK >= 1)) cfg.searchTopK = DEFAULTS.searchTopK;
     cfg.searchDeepK = Number(cfg.searchDeepK);
     if (!(cfg.searchDeepK >= 0 && cfg.searchDeepK <= 3)) cfg.searchDeepK = DEFAULTS.searchDeepK;
-    if (!['bing', 'ddg', 'searx', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
+    if (!['bing', 'ddg', 'multi', 'searx', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
     cfg.searchSearxInstance = String(cfg.searchSearxInstance || '').trim();
     if (!(cfg.requestTimeout >= 5)) cfg.requestTimeout = DEFAULTS.requestTimeout;
     if (!(cfg.maxRetry >= 0)) cfg.maxRetry = DEFAULTS.maxRetry;
@@ -1612,11 +1612,58 @@
       json: true,
       label: 'SearXNG（多实例轮换）',
       buildUrl: (q, base) => base + '/search?q=' + encodeURIComponent(q) + '&format=json'
+    },
+    // multi：多源官方 API 聚合（免 Key、JSON 稳定、几乎零反爬）——技术向覆盖：
+    // StackOverflow（编程问答）+ GitHub（仓库/代码）+ HackerNews（技术资讯观点）。
+    // 相比搜索引擎 HTML 抓取，官方 API 不受改版/反爬/品牌霸屏影响；缺点是非技术类中文话题覆盖弱。
+    multi: {
+      multi: true,
+      label: '官方 API 多源聚合（技术向·免Key·零反爬）'
     }
   };
   // SearXNG 公共实例池（内存轮换序：成功实例被提到队首）
   const SEARX_INSTANCES = ['https://searx.be', 'https://search.bus-hit.me', 'https://searx.tiekoetter.com', 'https://priv.au'];
   let searxOrder = SEARX_INSTANCES.slice();
+
+  // multi 引擎的子源定义（实测可达：hn.algolia / api.stackexchange / api.github search）
+  const MULTI_SOURCES = [
+    {
+      id: 'so', tag: 'StackOverflow',
+      build: (q) => 'https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&site=stackoverflow&pagesize=5&q=' + encodeURIComponent(q),
+      extract: (j) => {
+        const items = (j && Array.isArray(j.items)) ? j.items : [];
+        return items.map((it) => ({
+          title: it.title || '',
+          url: it.link || '',
+          snippet: '得分' + (it.score != null ? it.score : '?') + (it.is_answered ? ' · 已有答案' : '') + ' · 标签:' + ((it.tags || []).slice(0, 3).join('/'))
+        }));
+      }
+    },
+    {
+      id: 'gh', tag: 'GitHub',
+      build: (q) => 'https://api.github.com/search/repositories?q=' + encodeURIComponent(q) + '&sort=stars&per_page=5',
+      extract: (j) => {
+        const items = (j && Array.isArray(j.items)) ? j.items : [];
+        return items.map((it) => ({
+          title: (it.full_name || '') + (it.stargazers_count != null ? ' ★' + it.stargazers_count : ''),
+          url: it.html_url || '',
+          snippet: it.description || ''
+        }));
+      }
+    },
+    {
+      id: 'hn', tag: 'HackerNews',
+      build: (q) => 'https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(q) + '&tags=story&hitsPerPage=5',
+      extract: (j) => {
+        const hits = (j && Array.isArray(j.hits)) ? j.hits : [];
+        return hits.map((it) => ({
+          title: it.title || '',
+          url: it.url || ('https://news.ycombinator.com/item?id=' + it.objectID),
+          snippet: (it.points != null ? it.points + ' 分' : '') + (it.num_comments != null ? ' · ' + it.num_comments + ' 评论' : '') + (it.author ? ' · ' + it.author : '')
+        }));
+      }
+    }
+  ];
 
   // 宽松解析挑选结果：接受 {"pick":[...]} 或裸数组，两者都失败返回 null（调用方据此回退）
   function parsePickList(text) {
@@ -1757,6 +1804,46 @@
       resolve({ text: text, items: items, searched: true });
     };
     return new Promise((resolve, reject) => {
+      // multi 引擎：并行请求全部子源（官方 API，限流宽松），合并去重取 topK；
+      // 单源失败忽略（记录原因），全部失败才 reject
+      if (engine.multi) {
+        const outs = MULTI_SOURCES.map((src) => new Promise((res) => {
+          gmRequest({
+            method: 'GET',
+            url: src.build(query),
+            timeout: timeoutSec * 1000,
+            headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+            onload: (resp) => {
+              if (!(resp.status >= 200 && resp.status < 300)) { res({ src: src, items: [], err: 'HTTP' + resp.status }); return; }
+              try { const j = JSON.parse(resp.responseText || ''); res({ src: src, items: src.extract(j) }); }
+              catch (e) { res({ src: src, items: [], err: '非JSON' }); }
+            },
+            onerror: () => res({ src: src, items: [], err: '网络错误' }),
+            ontimeout: () => res({ src: src, items: [], err: '超时' }),
+            onabort: () => reject(stopRequested ? abortError() : new Error('请求已取消'))
+          });
+        }));
+        Promise.all(outs).then((list) => {
+          const ok = list.filter((o) => o.items.length);
+          if (!ok.length) {
+            const why = list.map((o) => o.src.id + ':' + (o.err || '空结果')).join('；');
+            reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，可换搜索源重试'));
+            return;
+          }
+          const seen = Object.create(null);
+          const items = [];
+          for (const o of list) {
+            for (const it of o.items) {
+              const key = it.url || it.title;
+              if (!key || seen[key]) continue;
+              seen[key] = true;
+              items.push(it);
+            }
+          }
+          finish(items.slice(0, topK), resolve, reject);
+        });
+        return;
+      }
       const errLogs = []; // 各实例失败原因，拼进最终报错便于判断是网络/HTTP/空结果
       const tryAt = (i) => {
         if (i >= attemptBases.length) {
@@ -3236,6 +3323,7 @@
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
                 <option value="bing">Bing 直连（推荐·免Key·脚本自己搜）</option>
                 <option value="ddg">DuckDuckGo 直连（备用·连续请求易被限流）</option>
+                <option value="multi">官方 API 多源聚合（SO/GitHub/HN·技术向·零反爬）</option>
                 <option value="searx">SearXNG 多实例轮换（JSON·干净·可自填实例）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
               </select>
