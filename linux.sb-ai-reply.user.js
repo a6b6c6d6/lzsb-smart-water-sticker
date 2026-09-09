@@ -2403,6 +2403,10 @@
       line.removeAttribute('data-tip');
       if (more) more.remove();
     }
+    // 该行正开着详情弹窗时：同步刷新弹窗内容（搜索进行中点开累积行，后续批次实时跟进）
+    if (logDetailFor === line && typeof refreshLogDetailBody === 'function' && hasTip) {
+      refreshLogDetailBody(tip);
+    }
   }
   // 生成期统一进度出口：单行状态（最新）+ 过程窗（累积）
   function reportProgress(msg, kind, tip) {
@@ -2571,12 +2575,28 @@
   /* ----- 详情弹窗：复用 .lsb-ai-modal 遮罩，长文细读 / 复制全文 ----- */
   let logDetailEl = null;
   let logDetailText = null; // 当前弹窗内容对应的原始纯文本（复制按钮的目标）
+  let logDetailFor = null;  // 当前弹窗正在展示的日志行（node 引用）；该行 tip 原地更新时自动同步弹窗
   function closeLogDetail() {
     if (logDetailEl) logDetailEl.classList.add('lsb-hidden');
+    logDetailFor = null;
+  }
+  // 把 tipText 重新渲染进弹窗正文并保持滚动位置（复制目标同步）
+  function refreshLogDetailBody(tipText) {
+    if (!logDetailEl) return;
+    const body = logDetailEl.querySelector('.lsb-ai-log-modal-body');
+    if (!body) return;
+    const st = body.scrollTop;
+    body.textContent = '';
+    body.appendChild(renderTipContent(tipText));
+    body.scrollTop = st;
+    logDetailText = tipText;
+    const copyBtn = logDetailEl.querySelector('.lsb-ai-log-modal-copy');
+    if (copyBtn) { copyBtn.classList.remove('copied'); copyBtn.textContent = '📋 复制全文'; }
   }
   function openLogDetail(line) {
     const tipText = line.getAttribute('data-tip');
     if (!tipText || !tipText.trim()) return;
+    logDetailFor = line;
     if (!logDetailEl) {
       logDetailEl = document.createElement('div');
       logDetailEl.className = 'lsb-ai-modal lsb-hidden';
@@ -2609,14 +2629,7 @@
     // 更新标题/正文/复制目标
     const title = logDetailEl.querySelector('.lsb-ai-log-modal-title');
     title.textContent = (line.textContent || '').replace(/\s*详情$/, '').trim().slice(0, 120) || '详情';
-    const body = logDetailEl.querySelector('.lsb-ai-log-modal-body');
-    body.textContent = '';
-    body.appendChild(renderTipContent(tipText));
-    body.scrollTop = 0;
-    logDetailText = tipText;
-    const copyBtn = logDetailEl.querySelector('.lsb-ai-log-modal-copy');
-    copyBtn.classList.remove('copied');
-    copyBtn.textContent = '📋 复制全文';
+    refreshLogDetailBody(tipText);
     logDetailEl.classList.remove('lsb-hidden');
   }
 
