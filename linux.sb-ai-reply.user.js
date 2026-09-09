@@ -1325,7 +1325,14 @@
     const info = getAuthorInfo(post);
     const role = isOwnerPost(post, ownerUid, firstPost) ? '楼主' : '用户';
     const floor = post.hasAttribute('data-floor') ? ('#' + post.getAttribute('data-floor') + ' ') : '';
-    return '【' + floor + role + '：' + info.name + '】\n' + md;
+    // 回复指向：本条 @ 了他人时，标头注明「回复了谁」，让 AI 分清对话对象与立场归属
+    //（首楼无 data-floor 天然排除；仅对楼层生效，避免把正文里的提及当回复）
+    let hint = '';
+    if (post.hasAttribute('data-floor')) {
+      const ms = parseMentions(post);
+      if (ms.length) hint = '（→ 回复 ' + (ms[0].username || '') + ' #' + ms[0].floor + '）';
+    }
+    return '【' + floor + role + '：' + info.name + hint + '】\n' + md;
   }
 
   // 针对目标评论抓取上下文：
