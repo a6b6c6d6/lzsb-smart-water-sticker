@@ -2299,7 +2299,10 @@
     const MAX_RETRY = (req && req.maxRetry != null) ? req.maxRetry : 2;
     for (let attempt = 0; ; attempt++) {
       try {
-        return await sendRequestOnce(req);
+        const r = await sendRequestOnce(req);
+        // 非流式输出也可能带 <think>（投票/挑选/规划 JSON 被思考块污染会解析失败）
+        if (r && typeof r.text === 'string') r.text = stripThinkingBlocks(r.text);
+        return r;
       } catch (e) {
         if (!e.retriable || attempt === MAX_RETRY) throw e;
         const wait = 1000 * (attempt + 1); // 1s、2s
@@ -2308,6 +2311,51 @@
         checkStop(); // 退避期间按了停止：别再发下一次（否则会漏出一个无人接收的孤儿请求）
       }
     }
+  }
+
+  // 模型思考块过滤：部分模型/中转站把 <think>…</think> 推理写进 content（而非独立 reasoning 字段），
+  // 会污染预览与回帖正文。完整文本清洗：闭合块删除；未闭合的（输出被截断）也从首个 <think 起删到结尾
+  function stripThinkingBlocks(text) {
+    let s = String(text == null ? '' : text);
+    s = s.replace(/<think>[\s\S]*?<\/think>/g, '');
+    const i = s.indexOf('<think');
+    if (i !== -1) s = s.slice(0, i);
+    return s.trim();
+  }
+  // 流式增量过滤器：<think> 常跨多个 token 且多在开头——开头缓冲到确认正文起始再显示；
+  // 正文期间再冒出的 think 也跳过至闭合。尾部孤立 '<'（可能为 think 的分片）扣留一拍。
+  function createThinkAwareEmitter(onToken) {
+    let buf = '';
+    let state = 'body'; // 'body'=正文直通 / 'think'=丢弃至 </think>
+    return (d) => {
+      buf += (d || '');
+      for (let guard = 0; guard < 3 && buf.length; guard++) {
+        if (state === 'body') {
+          const o = buf.indexOf('<think');
+          if (o !== -1) {
+            if (o > 0) onToken(buf.slice(0, o));
+            buf = buf.slice(o);
+            state = 'think';
+            continue;
+          }
+          // 尾部可能是未完成的 '<think' 分片：最后一个 '<' 之后还没有 '>' 且很短 → 扣住等待
+          const p = buf.lastIndexOf('<');
+          if (p !== -1 && buf.indexOf('>', p) === -1 && buf.length - p < 24) {
+            if (p > 0) onToken(buf.slice(0, p));
+            buf = buf.slice(p);
+            break;
+          }
+          onToken(buf);
+          buf = '';
+          break;
+        } else {
+          const c = buf.indexOf('</think>');
+          if (c === -1) break; // 等待更多数据把 think 块收完
+          buf = buf.slice(c + 8);
+          state = 'body';
+        }
+      }
+    };
   }
 
   // 从一行 SSE 数据里抽出增量文本（按三格式分别解析），非文本增量返回 ''
@@ -2418,8 +2466,14 @@
   async function sendRequestStream(req, onToken, onRetry, onReset) {
     const MAX_RETRY = (req && req.maxRetry != null) ? req.maxRetry : 2;
     for (let attempt = 0; ; attempt++) {
+      // 过滤 <think>…</think>：流式显示层（开头思考块缓冲后丢弃、正文直通）与最终文本。
+      // 每次尝试新建过滤器，避免上一轮半截 think/分片污染重试
+      let emitToken = onToken;
+      if (typeof onToken === 'function') emitToken = createThinkAwareEmitter(onToken);
       try {
-        return await sendRequestStreamOnce(req, onToken);
+        const r = await sendRequestStreamOnce(req, emitToken);
+        if (r && typeof r.text === 'string') r.text = stripThinkingBlocks(r.text);
+        return r;
       } catch (e) {
         if (!e.retriable || attempt === MAX_RETRY) throw e;
         const wait = 1000 * (attempt + 1);
