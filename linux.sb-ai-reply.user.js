@@ -1621,7 +1621,7 @@
       label: '官方 API 多源聚合（技术向·免Key·零反爬）'
     },
     // smart：按查询语言自动路由（推荐默认）——
-    // 中文词：DDG(通用网页) → Google News(中文资讯) → Bing；英文词：SO+HN → DDG → Bing
+    // 中文词：DDG(通用网页) → Google News(中文资讯) → Bing；英文词：SO+GitHub+HN → DDG → Bing
     smart: {
       smart: true,
       label: '智能路由（中英分流·DDG 通用兜底→Bing 终兜）'
@@ -1836,7 +1836,7 @@
         const bingE = CLIENT_SEARCH_ENGINES.bing;
         const ddgE = CLIENT_SEARCH_ENGINES.ddg;
         const newsSrc = MULTI_SOURCES.find((s) => s.id === 'news');
-        const jsonSrcs = MULTI_SOURCES.filter((s) => s.kind === 'json' && s.id !== 'gh'); // 英文源默认不含 gh（未认证 10/min 限流），保留 so/hn
+        const jsonSrcs = MULTI_SOURCES.filter((s) => s.kind === 'json'); // 英文源：SO+GitHub+HN（gh 未认证 10/min 限流，403 仅作单源失败，DDG/Bing 兜底接住）
         const timeoutMs = timeoutSec * 1000;
         const errLog = [];
         const isCJK = /[\u3400-\u9fff]/.test(query); // 含中日韩表意字符视为中文词
