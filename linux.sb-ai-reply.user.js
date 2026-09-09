@@ -110,7 +110,7 @@
     includeSpeaker: true,
     enableImage: true, // 多模态：抓取正文图片一起喂给模型（需模型支持视觉）
     enableSearch: false, // 联网搜索总开关
-    searchEngine: 'bing', // 搜索执行方式：'bing'/'ddg'/'searx'=脚本直连搜索引擎（免Key、不依赖中转站）；'api'=中转站内置 web_search 工具（原方式）
+    searchEngine: 'smart', // 搜索源：'smart'=智能路由（推荐默认）/'bing'=Bing 直连/'api'=中转站内置 web_search；引擎定义仍保留 ddg/multi/searx 供底层复用
     searchSearxInstance: '', // SearXNG 自填实例地址（如 https://searx.be）；留空用内置轮换池
     searchTopK: 8, // 客户端直搜时，每个关键词取前 N 条结果（宽进：候选池大，AI 全局挑选再决定深抓哪些）
     searchDeepK: 2, // 深抓正文：对前 N 条结果再抓一次目标网页正文（0=关闭，仅用搜索引擎摘要；1-3 控制条数）
@@ -3474,16 +3474,13 @@
             </div>
             <div class="lsb-ai-check-row">
               <input type="checkbox" id="lsb-ai-cfg-enableSearch">
-              <label for="lsb-ai-cfg-enableSearch">联网搜索（默认脚本直连 Bing，免Key、不依赖中转站；搜索源在下方切换）</label>
+              <label for="lsb-ai-cfg-enableSearch">联网搜索（默认智能路由：中英分流、免Key；源在下方切换）</label>
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">联网搜索源</label>
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
+                <option value="smart">智能路由（推荐·中英分流·DDG/News/SO/HN/GH+Bing 兜底）</option>
                 <option value="bing">Bing 直连（通用兜底·结果偏杂）</option>
-                <option value="ddg">DuckDuckGo 直连（备用·连续请求易被限流）</option>
-                <option value="smart">智能路由（中英分流·DDG 通用兜底→Bing 终兜）</option>
-                <option value="multi">官方 API 多源聚合（SO/GitHub/HN·技术向·零反爬）</option>
-                <option value="searx">SearXNG 多实例轮换（JSON·干净·可自填实例）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
               </select>
             </div>
