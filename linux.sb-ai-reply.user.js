@@ -1786,39 +1786,53 @@
     } catch (e) { return false; }
   }
 
-  // 知乎专用正文提取：页面的 js-initialData JSON 里藏有 answer/article 的 content HTML，
-  // 通用 textContent 拿不到（React 渲染 + 登录墙截断都会让 textContent 是空或导航），递归走 JSON 取最大 content 字符串剥标签
-  function extractZhihuText(html) {
+  // SSR 内嵌 JSON 正文提取（通用）：知乎 js-initialData / 头条 RENDER_DATA / Next.js __INITIAL_STATE__ 等
+  // 这类站正文由 JS 渲染进页面数据（content 字段是 HTML 字符串），通用 textContent 拿不到。
+  // 策略：抓内嵌 JSON → 递归取最长的 content/正文类字符串 → 剥标签合并空白。
+  function extractSsrLongest(html) {
     let best = '';
-    try {
-      const m = html.match(/<script id="js-initialData"[^>]*>([\s\S]*?)<\/script>/);
-      if (m) {
-        const d = JSON.parse(m[1]);
-        const walk = (o) => {
-          if (!o || typeof o !== 'object') return;
-          for (const k of Object.keys(o)) {
-            const v = o[k];
-            if (k === 'content' && typeof v === 'string' && v.length > best.length) best = v;
-            else if (v && typeof v === 'object') walk(v);
-          }
-        };
-        walk(d);
+    const tryTxt = (s) => { if (typeof s === 'string' && s.length > best.length) best = s; };
+    const walk = (o) => {
+      if (!o || typeof o !== 'object') return;
+      for (const k of Object.keys(o)) {
+        const v = o[k];
+        if (typeof v === 'string') {
+          if (k === 'content' || k === 'article_content' || k === 'articleContent' || k === 'text') tryTxt(v);
+          else if (/<[^>]{2,}>/.test(v) && v.length > best.length) tryTxt(v); // 含标签的长串多半是正文 HTML
+        } else if (v && typeof v === 'object') walk(v);
       }
-    } catch (e) { /* JSON 不规则时静默退回通用提取 */ }
+    };
+    // 1) 知乎：js-initialData
+    const m1 = html.match(/<script id="js-initialData"[^>]*>([\s\S]*?)<\/script>/);
+    if (m1) { try { walk(JSON.parse(m1[1])); } catch (e) { /* 继续下一候选 */ } }
+    // 2) 头条：RENDER_DATA（URL 编码 JSON）
+    const m2 = html.match(/RENDER_DATA\s*[:=]\s*["']([^"']+)["']/);
+    if (m2) {
+      try {
+        const dec = decodeURIComponent(m2[1]);
+        let j = null;
+        try { j = JSON.parse(dec); } catch (e2) { try { j = JSON.parse(dec.replace(/\\"/g, '"')); } catch (e3) { j = null; } }
+        if (j) walk(j);
+      } catch (e4) { /* 继续 */ }
+    }
+    // 3) Next.js / 通用 __INITIAL_STATE__
+    const m3 = html.match(/<script[^>]*>window\.__INITIAL_STATE__\s*=\s*([\s\S]*?)<\/script>/);
+    if (m3) { try { walk(JSON.parse(m3[1].replace(/;?\s*$/, ''))); } catch (e) { /* 继续 */ } }
     if (!best) return '';
-    // 知乎 content 是 HTML 字符串：剥标签、合并空白
-    const text = best.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    return text;
+    return best.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
   // 深抓目标网页正文：再 GET 一次搜索结果 URL，按优先级容器提取可读段落文本。
   // 失败 reject（上层降级：该条仍保留搜索引擎摘要，不拖累整组）。
   function fetchPageText(url, timeoutSec) {
     const t = timeoutSec || 12;
-    // 知乎域：带 Referer（降风控）+ 优先用 js-initialData JSON 提取正文
-    const isZhihu = /(^|\.)(zhihu\.com|zhuanlan\.zhihu\.com)$/i.test((function () { try { return new URL(url).hostname; } catch (e) { return ''; } })());
+    let host = '';
+    try { host = new URL(url).hostname; } catch (e) { /* 保持空 */ }
+    const isZhihu = /(^|\.)zhihu\.com$/i.test(host) || /(^|\.)zhuanlan\.zhihu\.com$/i.test(host);
+    const isToutiao = /(^|\.)toutiao\.com$/i.test(host);
     const reqHeaders = { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }; // 不覆盖 UA（受限头）
     if (isZhihu) reqHeaders['Referer'] = 'https://www.zhihu.com/';
+    if (isToutiao) reqHeaders['Referer'] = 'https://www.toutiao.com/';
     return new Promise((resolve, reject) => {
       gmRequest({
         method: 'GET',
@@ -1828,11 +1842,11 @@
         onload: (resp) => {
           if (!(resp.status >= 200 && resp.status < 300)) { reject(new Error('HTTP ' + resp.status)); return; }
           const rawHtml = resp.responseText || '';
-          // 知乎专用提取：登录态 SSR JSON 里有正文 content，优先于此路径
-          if (isZhihu) {
-            const zhText = extractZhihuText(rawHtml);
-            if (zhText.length >= 80) { resolve(zhText.slice(0, 4000)); return; }
-            // 提取失败（未登录/JSON 结构变化）→ 退回通用 HTML 容器（拿不到正文时上层会判"正文过短"→ 降级摘要）
+          // SSR 内嵌 JSON 提取优先（知乎/头条/Next.js 等 JS 渲染站）
+          if (isZhihu || isToutiao) {
+            const ssr = extractSsrLongest(rawHtml);
+            if (ssr.length >= 80) { resolve(ssr.slice(0, 4000)); return; }
+            // 提取失败（未登录/结构变化）→ 退回通用 HTML 容器（仍失败则上层降级摘要）
           }
           let doc;
           try { doc = new DOMParser().parseFromString(rawHtml, 'text/html'); }
