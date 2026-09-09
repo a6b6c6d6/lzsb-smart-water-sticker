@@ -1775,21 +1775,67 @@
   function isSameSite(u) {
     try { return new URL(u, location.href).hostname === location.hostname; } catch (e) { return false; }
   }
+  // 强反爬站深抓黑名单：脚本直连基本拿不到正文（需登录/JS渲染/反爬WAF），
+  // 直接判 skip 不发请求、不报错；摘要仍可用于回帖素材。
+  // 注：知乎不在黑名单——登录态 cookie + js-initialData 专用提取可拿到正文（见 extractZhihuText）。
+  const DEEP_FETCH_BLOCKED = ['news.google.com', 'xiaohongshu.com', 'mp.weixin.qq.com', 'weibo.cn', 'weibo.com', 'douyin.com'];
+  const isDeepBlocked = (u) => {
+    try {
+      const h = new URL(u, location.href).hostname.toLowerCase();
+      return DEEP_FETCH_BLOCKED.some((d) => h === d || h.endsWith('.' + d));
+    } catch (e) { return false; }
+  }
+
+  // 知乎专用正文提取：页面的 js-initialData JSON 里藏有 answer/article 的 content HTML，
+  // 通用 textContent 拿不到（React 渲染 + 登录墙截断都会让 textContent 是空或导航），递归走 JSON 取最大 content 字符串剥标签
+  function extractZhihuText(html) {
+    let best = '';
+    try {
+      const m = html.match(/<script id="js-initialData"[^>]*>([\s\S]*?)<\/script>/);
+      if (m) {
+        const d = JSON.parse(m[1]);
+        const walk = (o) => {
+          if (!o || typeof o !== 'object') return;
+          for (const k of Object.keys(o)) {
+            const v = o[k];
+            if (k === 'content' && typeof v === 'string' && v.length > best.length) best = v;
+            else if (v && typeof v === 'object') walk(v);
+          }
+        };
+        walk(d);
+      }
+    } catch (e) { /* JSON 不规则时静默退回通用提取 */ }
+    if (!best) return '';
+    // 知乎 content 是 HTML 字符串：剥标签、合并空白
+    const text = best.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    return text;
+  }
 
   // 深抓目标网页正文：再 GET 一次搜索结果 URL，按优先级容器提取可读段落文本。
   // 失败 reject（上层降级：该条仍保留搜索引擎摘要，不拖累整组）。
   function fetchPageText(url, timeoutSec) {
     const t = timeoutSec || 12;
+    // 知乎域：带 Referer（降风控）+ 优先用 js-initialData JSON 提取正文
+    const isZhihu = /(^|\.)(zhihu\.com|zhuanlan\.zhihu\.com)$/i.test((function () { try { return new URL(url).hostname; } catch (e) { return ''; } })());
+    const reqHeaders = { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }; // 不覆盖 UA（受限头）
+    if (isZhihu) reqHeaders['Referer'] = 'https://www.zhihu.com/';
     return new Promise((resolve, reject) => {
       gmRequest({
         method: 'GET',
         url: url,
         timeout: t * 1000,
-        headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }, // 不覆盖 UA（受限头）
+        headers: reqHeaders,
         onload: (resp) => {
           if (!(resp.status >= 200 && resp.status < 300)) { reject(new Error('HTTP ' + resp.status)); return; }
+          const rawHtml = resp.responseText || '';
+          // 知乎专用提取：登录态 SSR JSON 里有正文 content，优先于此路径
+          if (isZhihu) {
+            const zhText = extractZhihuText(rawHtml);
+            if (zhText.length >= 80) { resolve(zhText.slice(0, 4000)); return; }
+            // 提取失败（未登录/JSON 结构变化）→ 退回通用 HTML 容器（拿不到正文时上层会判"正文过短"→ 降级摘要）
+          }
           let doc;
-          try { doc = new DOMParser().parseFromString(resp.responseText || '', 'text/html'); }
+          try { doc = new DOMParser().parseFromString(rawHtml, 'text/html'); }
           catch (e) { reject(new Error('HTML 解析失败')); return; }
           // 候选正文容器：语义化标签优先（维基 mw-content-text、GitHub markdown-body 等），退到 body
           const cands = ['article', '#mw-content-text', 'main', '.markdown-body', '.post-content', '.entry-content', '.article-content', 'body'];
@@ -1804,9 +1850,8 @@
           // 剥无关块：导航/页脚/侧栏/广告/评论区等
           clone.querySelectorAll('script,style,noscript,nav,footer,header,aside,form,iframe,svg,.ad,.ads,.advertisement,.advert,.cookie,.cookie-banner,.banner,#footer,#header,.nav,.menu,.menus,.sidebar,.comment,.comments,.social-share,.related,.recommend,.recommended').forEach((el) => el.remove());
           let text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
-          // 去除明显的模板噪音（导航词堆叠等场景无法完全规避，先保证长度与可读性）
           if (text.length < 80) { reject(new Error('正文过短（可能需登录或 JS 渲染）')); return; }
-          resolve(text.slice(0, 4000)); // 单条上限 4000 字：兼顾关键内容（长文后段：经历/争议/评价）与请求体大小
+          resolve(text.slice(0, 4000));
         },
         onerror: () => reject(new Error('网络错误')),
         ontimeout: () => reject(new Error('超时(' + t + 's)')),
@@ -2520,6 +2565,7 @@
         const c = byKey[key];
         if (!c) continue;
         if (isSameSite(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true }); continue; }
+        if (isDeepBlocked(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true, info: '强反爬站，保留摘要' }); continue; }
         try {
           const txt = await stopRace(fetchPageText(c.url, 12));
           checkStop();
