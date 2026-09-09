@@ -663,7 +663,7 @@
     if (!(cfg.searchTopK >= 1)) cfg.searchTopK = DEFAULTS.searchTopK;
     cfg.searchDeepK = Number(cfg.searchDeepK);
     if (!(cfg.searchDeepK >= 0 && cfg.searchDeepK <= 3)) cfg.searchDeepK = DEFAULTS.searchDeepK;
-    if (!['bing', 'ddg', 'multi', 'searx', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
+    if (!['bing', 'ddg', 'smart', 'multi', 'searx', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
     cfg.searchSearxInstance = String(cfg.searchSearxInstance || '').trim();
     if (!(cfg.requestTimeout >= 5)) cfg.requestTimeout = DEFAULTS.requestTimeout;
     if (!(cfg.maxRetry >= 0)) cfg.maxRetry = DEFAULTS.maxRetry;
@@ -1619,6 +1619,12 @@
     multi: {
       multi: true,
       label: '官方 API 多源聚合（技术向·免Key·零反爬）'
+    },
+    // smart：按查询语言自动路由（推荐默认）——
+    // 中文词：DDG(通用网页) → Google News(中文资讯) → Bing；英文词：SO+HN → Bing
+    smart: {
+      smart: true,
+      label: '智能路由（中文 DDG→GoogleNews，英文 SO/HN→Bing 兜底）'
     }
   };
   // SearXNG 公共实例池（内存轮换序：成功实例被提到队首）
@@ -1822,6 +1828,90 @@
       resolve({ text: text, items: items, searched: true });
     };
     return new Promise((resolve, reject) => {
+      // smart 引擎：按查询语言自动路由——
+      // 中文词：DDG(通用网页) → Google News(中文资讯) → Bing 兜底
+      // 英文词：SO+GitHub+HN 并行(技术垂直) → Bing 兜底
+      // 词内串行尝试，命中即停，减少无效请求；DDG 限流/空只当该级失败
+      if (engine.smart) {
+        const bingE = CLIENT_SEARCH_ENGINES.bing;
+        const ddgE = CLIENT_SEARCH_ENGINES.ddg;
+        const newsSrc = MULTI_SOURCES.find((s) => s.id === 'news');
+        const jsonSrcs = MULTI_SOURCES.filter((s) => s.kind === 'json' && s.id !== 'gh'); // 英文源默认不含 gh（未认证 10/min 限流），保留 so/hn
+        const timeoutMs = timeoutSec * 1000;
+        const errLog = [];
+        const isCJK = /[\u3400-\u9fff]/.test(query); // 含中日韩表意字符视为中文词
+        const fetchItems = (url, parser) => new Promise((res) => {
+          gmRequest({
+            method: 'GET',
+            url: url,
+            timeout: timeoutMs,
+            headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+            onload: (resp) => {
+              if (!(resp.status >= 200 && resp.status < 300)) { res({ ok: false, err: 'HTTP' + resp.status }); return; }
+              try {
+                const items = parser(resp.responseText || '') || [];
+                res(items.length ? { ok: true, items: items } : { ok: false, err: '空结果' });
+              } catch (e) { res({ ok: false, err: '解析失败' }); }
+            },
+            onerror: () => res({ ok: false, err: '网络错误' }),
+            ontimeout: () => res({ ok: false, err: '超时' }),
+            onabort: () => res({ ok: false, aborted: true })
+          });
+        });
+        const htmlParse = (eng) => (txt) => { const doc = new DOMParser().parseFromString(txt, 'text/html'); return eng.parse(doc, topK); };
+        const mergeItems = (lists) => {
+          const seen = Object.create(null);
+          const out = [];
+          for (const list of lists) {
+            for (const it of list) {
+              const key = it.url || it.title;
+              if (!key || seen[key]) continue;
+              seen[key] = true;
+              out.push(it);
+            }
+          }
+          return out.slice(0, topK);
+        };
+        (async () => {
+          try {
+            checkStop();
+            let items = null;
+            if (isCJK) {
+              const ddgR = await fetchItems(ddgE.buildUrl(query), htmlParse(ddgE));
+              checkStop();
+              if (ddgR.ok) items = ddgR.items;
+              else {
+                errLog.push('DDG:' + (ddgR.err || '失败'));
+                const newsR = await fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt));
+                checkStop();
+                if (newsR.ok) items = newsR.items;
+                else errLog.push('GoogleNews:' + (newsR.err || '失败'));
+              }
+            } else {
+              const outs = await Promise.all(jsonSrcs.map((src) => fetchItems(src.build(query), (txt) => src.extract(JSON.parse(txt)))));
+              checkStop();
+              const ok = outs.filter((o) => o.ok);
+              if (ok.length) items = mergeItems(ok.map((o) => o.items));
+              else outs.forEach((o, i) => errLog.push(jsonSrcs[i].id + ':' + (o.err || '失败')));
+            }
+            if (!items || !items.length) {
+              const bingR = await fetchItems(bingE.buildUrl(query), htmlParse(bingE));
+              checkStop();
+              if (bingR.ok) items = bingR.items;
+              else errLog.push('Bing:' + (bingR.err || '失败'));
+            }
+            if (!items || !items.length) {
+              reject(new Error('搜索失败：smart 各层均不可用[' + (errLog.join('；') || '未知') + ']，可换搜索源重试'));
+              return;
+            }
+            finish(items.slice(0, topK), resolve, reject);
+          } catch (e) {
+            if (e && e.aborted) { reject(e); return; }
+            reject(new Error('搜索失败：' + (e.message || e)));
+          }
+        })();
+        return;
+      }
       // multi 引擎：并行请求全部子源（官方 API/RSS，免 Key），合并去重取 topK；
       // 单源失败忽略（记录原因）。若全部为空（垂直源覆盖不到中文资讯等话题）：
       // 自动用 Bing 兜底补搜一次——宁要杂结果不要整词失败
@@ -3358,8 +3448,9 @@
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">联网搜索源</label>
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
-                <option value="bing">Bing 直连（推荐·免Key·脚本自己搜）</option>
+                <option value="bing">Bing 直连（通用兜底·结果偏杂）</option>
                 <option value="ddg">DuckDuckGo 直连（备用·连续请求易被限流）</option>
+                <option value="smart">智能路由（中文 DDG→GoogleNews，英文 SO/HN→Bing）</option>
                 <option value="multi">官方 API 多源聚合（SO/GitHub/HN·技术向·零反爬）</option>
                 <option value="searx">SearXNG 多实例轮换（JSON·干净·可自填实例）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
