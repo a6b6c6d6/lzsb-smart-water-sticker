@@ -1727,36 +1727,6 @@
     return m ? Number(m[1]) : -1;
   }
 
-  // 最近一次联网搜索的「候选清单」精炼格式（供「📋 候选」按钮复制，对接搜索素材精炼提示词）
-  let lastCandidatesTxt = '';
-  // 把 rows（含全部词的浅搜条目）转成一句话/一组段落：每个词一节的编号清单，去重后传给强模型
-  function buildCandidatesTxt(rows) {
-    const byKey = Object.create(null); // key → { title,url,snippet }
-    const seen = Object.create(null);  // 归一化 URL 去重
-    rows.forEach((row, wi) => {
-      (row.items || []).forEach((it, j) => {
-        const key = 'S' + wi + '-' + j;
-        if (!byKey[key]) byKey[key] = { title: it.title || '', url: it.url || '', snippet: it.snippet || '' };
-      });
-    });
-    const parts = [];
-    rows.forEach((row, wi) => {
-      const sec = [];
-      (row.items || []).forEach((it, j) => {
-        const key = 'S' + wi + '-' + j;
-        const item = byKey[key];
-        if (!item) return;
-        const nu = normalizeUrl(item.url);
-        if (!nu || seen[nu]) return; // 跨词重复（已深抓或同页再次出现）不重复列出
-        seen[nu] = true;
-        const sn = (item.snippet || '').length > 180 ? item.snippet.slice(0, 180) + '…' : (item.snippet || '');
-        sec.push((j + 1) + '. ' + item.title + '\n链接：' + item.url + (sn ? '\n摘要：' + sn : ''));
-      });
-      if (sec.length) parts.push('【关键词：' + row.label + '】\n' + sec.join('\n'));
-    });
-    return parts.join('\n\n');
-  }
-
   // URL 归一化，供候选去重：解出 DDG 跳转真实地址，去掉无意义的 UTM/统计参数、锚点、尾斜杠，
   // 让同一页面的不同写法视为同一候选（否则会被跨词重复计入、甚至深抓两遍）
   function normalizeUrl(u) {
@@ -2625,28 +2595,6 @@
       updateSearchSummary(msg, allBatchTips.join('\n\n'), sumFail === 0 ? 'done' : 'warn');
     }
 
-    // 所有关键词浅搜完成：缓存候选清单（精炼格式），供「📋 候选」按钮复制——此时 rows 已齐、未深抓，
-    // 是用户想拿去给强模型精炼的最佳时点（深抓后的正文不在这份清单里，精炼只针对候选来源）
-    lastCandidatesTxt = buildCandidatesTxt(rows);
-    if (lastCandidatesTxt && logBodyEl) {
-      // 追加一条「📋 候选」行：点击复制候选清单（对接搜索素材精炼提示词的手动工作流）
-      const candLine = document.createElement('div');
-      candLine.className = 'lsb-ai-log-line';
-      const idx = document.createElement('span');
-      idx.className = 'lsb-ai-log-idx';
-      idx.textContent = String(logIdx).padStart(2, '0');
-      candLine.appendChild(idx);
-      const candBtn = document.createElement('span');
-      candBtn.className = 'lsb-ai-log-more';
-      candBtn.textContent = '📋 候选';
-      candBtn.title = '复制候选清单（搜索素材精炼格式），供强模型二次精炼';
-      candBtn.addEventListener('click', () => copyTextToClipboard(lastCandidatesTxt, candBtn));
-      candLine.appendChild(candBtn);
-      candLine.appendChild(document.createTextNode('📦 候选清单已就绪：点上方「📋 候选」复制给强模型精炼'));
-      logBodyEl.appendChild(candLine);
-      if (logNearBottom()) logBodyEl.scrollTop = logBodyEl.scrollHeight;
-    }
-
     // 全局深抓：收齐全部词的候选后，一次 AI 调用跨词挑选值得看正文的条目 → 逐条深抓 → 按 key 回填。
     // searchDeepK=0 关闭深抓（纯摘要）；api 源走中转站内置 web_search，拿不到结构化条目，不参与深抓。
     const deepFallbackK = Math.min(Math.max(Number(cfg.searchDeepK) >= 0 ? Math.floor(Number(cfg.searchDeepK)) : 2, 0), 3);
@@ -2751,8 +2699,6 @@
     const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
     const r = await stopRace(streamFinal(req));
     checkStop();
-    // 缓存候选清单（精炼格式），供「📋 候选」按钮复制给强模型二次精炼
-    lastCandidatesTxt = buildCandidatesTxt(rows);
     return { text: r.text, searched: true };
   }
 
