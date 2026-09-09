@@ -1621,10 +1621,10 @@
       label: '官方 API 多源聚合（技术向·免Key·零反爬）'
     },
     // smart：按查询语言自动路由（推荐默认）——
-    // 中文词：DDG(通用网页) → Google News(中文资讯) → Bing；英文词：SO+HN → Bing
+    // 中文词：DDG(通用网页) → Google News(中文资讯) → Bing；英文词：SO+HN → DDG → Bing
     smart: {
       smart: true,
-      label: '智能路由（中文 DDG→GoogleNews，英文 SO/HN→Bing 兜底）'
+      label: '智能路由（中英分流·DDG 通用兜底→Bing 终兜）'
     }
   };
   // SearXNG 公共实例池（内存轮换序：成功实例被提到队首）
@@ -1892,7 +1892,14 @@
               checkStop();
               const ok = outs.filter((o) => o.ok);
               if (ok.length) items = mergeItems(ok.map((o) => o.items));
-              else outs.forEach((o, i) => errLog.push(jsonSrcs[i].id + ':' + (o.err || '失败')));
+              else {
+                outs.forEach((o, i) => errLog.push(jsonSrcs[i].id + ':' + (o.err || '失败')));
+                // 英文垂直源空 → DDG 兜底（通用网页/英文索引更全）
+                const ddgR2 = await fetchItems(ddgE.buildUrl(query), htmlParse(ddgE));
+                checkStop();
+                if (ddgR2.ok) items = ddgR2.items;
+                else errLog.push('DDG:' + (ddgR2.err || '失败'));
+              }
             }
             if (!items || !items.length) {
               const bingR = await fetchItems(bingE.buildUrl(query), htmlParse(bingE));
@@ -3450,7 +3457,7 @@
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
                 <option value="bing">Bing 直连（通用兜底·结果偏杂）</option>
                 <option value="ddg">DuckDuckGo 直连（备用·连续请求易被限流）</option>
-                <option value="smart">智能路由（中文 DDG→GoogleNews，英文 SO/HN→Bing）</option>
+                <option value="smart">智能路由（中英分流·DDG 通用兜底→Bing 终兜）</option>
                 <option value="multi">官方 API 多源聚合（SO/GitHub/HN·技术向·零反爬）</option>
                 <option value="searx">SearXNG 多实例轮换（JSON·干净·可自填实例）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
