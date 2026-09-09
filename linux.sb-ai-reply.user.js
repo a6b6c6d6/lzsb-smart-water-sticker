@@ -360,6 +360,16 @@
     /* 批量搜索结果按词分节的小节标题（详情弹窗内） */
     .lsb-ai-batch-word { font-size: 12px; font-weight: 700; color: #1e40af; margin: 8px 0 4px; padding-bottom: 3px; border-bottom: 1px dashed #bfdbfe; }
     .lsb-ai-batch-word:first-child { margin-top: 0; }
+    /* 搜索结果来源徽标（按来源着色：DDG/GN/SO/GH/HN/Bing/SearX） */
+    .lsb-src-badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 5px; margin-right: 5px; border-radius: 4px; vertical-align: 1px; line-height: 1.6; }
+    .lsb-src-bing { background: #dbeafe; color: #1d4ed8; }
+    .lsb-src-ddg { background: #ede9fe; color: #6d28d9; }
+    .lsb-src-gn { background: #fee2e2; color: #b91c1c; }
+    .lsb-src-so { background: #ffedd5; color: #c2410c; }
+    .lsb-src-gh { background: #e5e7eb; color: #111827; }
+    .lsb-src-hn { background: #fef3c7; color: #b45309; }
+    .lsb-src-searx { background: #cffafe; color: #0e7490; }
+    .lsb-src-api { background: #ccfbf1; color: #0f766e; }
 
     .lsb-ai-preview {
       min-height: 110px;
@@ -1819,11 +1829,12 @@
     const attemptBases = engine.json
       ? (customInst ? [customInst].concat(searxOrder.filter((x) => x !== customInst)) : searxOrder.slice())
       : [null];
-    const finish = (items, resolve, reject) => {
+    const finish = (raw, resolve, reject) => {
+      const items = raw.map((it) => (it.src ? it : Object.assign({}, it, { src: engineName })));
       if (!items.length) { reject(new Error('无结果（可能被搜索引擎反爬拦截，可换搜索源重试）')); return; }
       const text = items.map((it, i) => {
         const sn = (it.snippet || '').length > 300 ? it.snippet.slice(0, 300) + '…' : (it.snippet || '');
-        return (i + 1) + '. ' + it.title + '\n链接：' + it.url + (sn ? '\n摘要：' + sn : '');
+        return (i + 1) + '. ' + (it.src ? '[' + it.src + '] ' : '') + it.title + '\n链接：' + it.url + (sn ? '\n摘要：' + sn : '');
       }).join('\n');
       resolve({ text: text, items: items, searched: true });
     };
@@ -1840,22 +1851,22 @@
         const timeoutMs = timeoutSec * 1000;
         const errLog = [];
         const isCJK = /[\u3400-\u9fff]/.test(query); // 含中日韩表意字符视为中文词
-        const fetchItems = (url, parser) => new Promise((res) => {
+        const fetchItems = (url, parser, tag) => new Promise((res) => {
           gmRequest({
             method: 'GET',
             url: url,
             timeout: timeoutMs,
             headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
             onload: (resp) => {
-              if (!(resp.status >= 200 && resp.status < 300)) { res({ ok: false, err: 'HTTP' + resp.status }); return; }
+              if (!(resp.status >= 200 && resp.status < 300)) { res({ ok: false, err: 'HTTP' + resp.status, tag: tag }); return; }
               try {
                 const items = parser(resp.responseText || '') || [];
-                res(items.length ? { ok: true, items: items } : { ok: false, err: '空结果' });
-              } catch (e) { res({ ok: false, err: '解析失败' }); }
+                res(items.length ? { ok: true, items: items, tag: tag } : { ok: false, err: '空结果', tag: tag });
+              } catch (e) { res({ ok: false, err: '解析失败', tag: tag }); }
             },
-            onerror: () => res({ ok: false, err: '网络错误' }),
-            ontimeout: () => res({ ok: false, err: '超时' }),
-            onabort: () => res({ ok: false, aborted: true })
+            onerror: () => res({ ok: false, err: '网络错误', tag: tag }),
+            ontimeout: () => res({ ok: false, err: '超时', tag: tag }),
+            onabort: () => res({ ok: false, aborted: true, tag: tag })
           });
         });
         const htmlParse = (eng) => (txt) => { const doc = new DOMParser().parseFromString(txt, 'text/html'); return eng.parse(doc, topK); };
@@ -1876,35 +1887,36 @@
           try {
             checkStop();
             let items = null;
+            const tagItems = (arr, tag) => arr.map((it) => Object.assign({}, it, { src: tag }));
             if (isCJK) {
-              const ddgR = await fetchItems(ddgE.buildUrl(query), htmlParse(ddgE));
+              const ddgR = await fetchItems(ddgE.buildUrl(query), htmlParse(ddgE), 'DDG');
               checkStop();
-              if (ddgR.ok) items = ddgR.items;
+              if (ddgR.ok) items = tagItems(ddgR.items, 'DDG');
               else {
                 errLog.push('DDG:' + (ddgR.err || '失败'));
-                const newsR = await fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt));
+                const newsR = await fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN');
                 checkStop();
-                if (newsR.ok) items = newsR.items;
-                else errLog.push('GoogleNews:' + (newsR.err || '失败'));
+                if (newsR.ok) items = tagItems(newsR.items, 'GN');
+                else errLog.push('GN:' + (newsR.err || '失败'));
               }
             } else {
-              const outs = await Promise.all(jsonSrcs.map((src) => fetchItems(src.build(query), (txt) => src.extract(JSON.parse(txt)))));
+              const outs = await Promise.all(jsonSrcs.map((src) => fetchItems(src.build(query), (txt) => src.extract(JSON.parse(txt)), src.id.toUpperCase())));
               checkStop();
               const ok = outs.filter((o) => o.ok);
-              if (ok.length) items = mergeItems(ok.map((o) => o.items));
+              if (ok.length) items = mergeItems(ok.map((o) => tagItems(o.items, o.tag)));
               else {
-                outs.forEach((o, i) => errLog.push(jsonSrcs[i].id + ':' + (o.err || '失败')));
+                outs.forEach((o) => errLog.push(o.tag + ':' + (o.err || '失败')));
                 // 英文垂直源空 → DDG 兜底（通用网页/英文索引更全）
-                const ddgR2 = await fetchItems(ddgE.buildUrl(query), htmlParse(ddgE));
+                const ddgR2 = await fetchItems(ddgE.buildUrl(query), htmlParse(ddgE), 'DDG');
                 checkStop();
-                if (ddgR2.ok) items = ddgR2.items;
+                if (ddgR2.ok) items = tagItems(ddgR2.items, 'DDG');
                 else errLog.push('DDG:' + (ddgR2.err || '失败'));
               }
             }
             if (!items || !items.length) {
-              const bingR = await fetchItems(bingE.buildUrl(query), htmlParse(bingE));
+              const bingR = await fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing');
               checkStop();
-              if (bingR.ok) items = bingR.items;
+              if (bingR.ok) items = tagItems(bingR.items, 'Bing');
               else errLog.push('Bing:' + (bingR.err || '失败'));
             }
             if (!items || !items.length) {
@@ -1956,7 +1968,7 @@
                 let items = [];
                 try { const doc = new DOMParser().parseFromString(resp2.responseText || '', 'text/html'); items = bingEngine.parse(doc, topK); } catch (e) { /* 兜底解析失败 */ }
                 if (!items.length) { reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，Bing 兜底无结果')); return; }
-                finish(items.slice(0, topK), resolve, reject);
+                finish(items.map((it) => Object.assign({}, it, { src: 'Bing' })).slice(0, topK), resolve, reject);
               },
               onerror: () => reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，Bing 兜底网络错误')),
               ontimeout: () => reject(new Error('搜索失败：multi 各源均不可用[' + why + ']，Bing 兜底超时')),
@@ -1967,11 +1979,12 @@
           const seen = Object.create(null);
           const items = [];
           for (const o of list) {
+            const tag = (o.src.id === 'news') ? 'GN' : o.src.id.toUpperCase();
             for (const it of o.items) {
               const key = it.url || it.title;
               if (!key || seen[key]) continue;
               seen[key] = true;
-              items.push(it);
+              items.push(Object.assign({}, it, { src: tag }));
             }
           }
           finish(items.slice(0, topK), resolve, reject);
@@ -2818,8 +2831,19 @@
       const label = headM[1] + '. ' + headM[2];
       const title = document.createElement('span');
       title.className = 'lsb-ai-deep-title';
-      title.textContent = label;
-      title.title = label;
+      // 来源徽标：标题以 [DDG]/[GN]/[SO]… 开头时渲染成带色徽标，一眼看清结果来自哪个引擎
+      const srcM = headM[2].match(/^\[([A-Za-z]{1,8})\]\s+(.*)$/);
+      if (srcM) {
+        const badge = document.createElement('span');
+        badge.className = 'lsb-src-badge lsb-src-' + srcM[1].toLowerCase();
+        badge.textContent = srcM[1];
+        title.appendChild(badge);
+        title.appendChild(document.createTextNode(headM[1] + '. ' + srcM[2]));
+        title.title = label;
+      } else {
+        title.textContent = label;
+        title.title = label;
+      }
       head.appendChild(title);
       head.addEventListener('click', () => item.classList.toggle('open'));
       item.appendChild(head);
