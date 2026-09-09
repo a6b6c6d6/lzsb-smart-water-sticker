@@ -2403,8 +2403,10 @@
       line.removeAttribute('data-tip');
       if (more) more.remove();
     }
-    // 该行正开着详情弹窗时：同步刷新弹窗内容（搜索进行中点开累积行，后续批次实时跟进）
+    // 该行正开着详情弹窗时：同步刷新（标题进度 + 正文内容），搜索进行中开着累积行能看到实时跟进
     if (logDetailFor === line && typeof refreshLogDetailBody === 'function' && hasTip) {
+      const title = logDetailEl.querySelector('.lsb-ai-log-modal-title');
+      if (title) title.textContent = (line.textContent || '').replace(/\s*详情$/, '').trim().slice(0, 120) || '详情';
       refreshLogDetailBody(tip);
     }
   }
