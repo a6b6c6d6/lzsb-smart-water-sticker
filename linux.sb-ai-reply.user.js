@@ -3485,10 +3485,6 @@
               </select>
             </div>
             <div class="lsb-ai-row">
-              <label class="lsb-ai-label">SearXNG 自填实例（选 searx 时生效·留空用内置轮换池）</label>
-              <input class="lsb-ai-input" id="lsb-ai-cfg-searchSearxInstance" type="text" placeholder="https://searx.be（填到域名即可，勿带 /search）" autocomplete="off">
-            </div>
-            <div class="lsb-ai-row">
               <label class="lsb-ai-label">每词取结果条数（客户端直搜 1-20，宽进候选池供 AI 挑选）</label>
               <input class="lsb-ai-input" id="lsb-ai-cfg-searchTopK" type="number" min="1" max="20" step="1">
             </div>
