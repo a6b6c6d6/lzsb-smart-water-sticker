@@ -1727,6 +1727,63 @@
     return m ? Number(m[1]) : -1;
   }
 
+  // 最近一次联网搜索的「候选清单」精炼格式（供「📋 候选」按钮复制，对接搜索素材精炼提示词）
+  let lastCandidatesTxt = '';
+  // 把 rows（含全部词的浅搜条目）转成一句话/一组段落：每个词一节的编号清单，去重后传给强模型
+  function buildCandidatesTxt(rows) {
+    const byKey = Object.create(null); // key → { title,url,snippet }
+    const seen = Object.create(null);  // 归一化 URL 去重
+    rows.forEach((row, wi) => {
+      (row.items || []).forEach((it, j) => {
+        const key = 'S' + wi + '-' + j;
+        if (!byKey[key]) byKey[key] = { title: it.title || '', url: it.url || '', snippet: it.snippet || '' };
+      });
+    });
+    const parts = [];
+    rows.forEach((row, wi) => {
+      const sec = [];
+      (row.items || []).forEach((it, j) => {
+        const key = 'S' + wi + '-' + j;
+        const item = byKey[key];
+        if (!item) return;
+        const nu = normalizeUrl(item.url);
+        if (!nu || seen[nu]) return; // 跨词重复（已深抓或同页再次出现）不重复列出
+        seen[nu] = true;
+        const sn = (item.snippet || '').length > 180 ? item.snippet.slice(0, 180) + '…' : (item.snippet || '');
+        sec.push((j + 1) + '. ' + item.title + '\n链接：' + item.url + (sn ? '\n摘要：' + sn : ''));
+      });
+      if (sec.length) parts.push('【关键词：' + row.label + '】\n' + sec.join('\n'));
+    });
+    return parts.join('\n\n');
+  }
+
+  // URL 归一化，供候选去重：解出 DDG 跳转真实地址，去掉无意义的 UTM/统计参数、锚点、尾斜杠，
+  // 让同一页面的不同写法视为同一候选（否则会被跨词重复计入、甚至深抓两遍）
+  function normalizeUrl(u) {
+    let raw = String(u || '').trim();
+    if (!raw) return '';
+    const m = raw.match(/[?&]uddg=([^&]+)/); // DDG 结果用 /l/?uddg= 包了一层跳转
+    if (m) { try { raw = decodeURIComponent(m[1]); } catch (e) { /* 解码失败保持原链接 */ } }
+    if (raw.indexOf('//') === 0) raw = 'https:' + raw;
+    try {
+      const uu = new URL(raw);
+      // 去掉 tracking 参数（utm_*、gclid、ref 等按需），保留其余 query
+      const drop = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid'];
+      let changed = false;
+      drop.forEach((k) => { if (uu.searchParams && uu.searchParams.has(k)) { uu.searchParams.delete(k); changed = true; } });
+      if (changed && uu.searchParams) {
+        const sp = uu.searchParams.toString(); // 删参数后可能为空串
+        uu.search = sp;
+      }
+      // 单段路径去掉末尾斜杠（避免 /path 与 /path/ 视为不同）
+      if (uu.pathname.length > 1 && uu.pathname.endsWith('/')) uu.pathname = uu.pathname.replace(/\/+$/, '');
+      uu.hash = ''; // 锚点不算不同页面
+      return uu.href;
+    } catch (e) {
+      return raw; // 解析失败退回原样（不误伤）
+    }
+  }
+
   // 全局挑选：把「全部搜索词 × 全部浅搜条目」做成一份带唯一 key 的清单，一次 AI 调用挑出值得深抓正文的条目。
   // candRows: [{ key, label, wordIdx, title, url, snippet }]，key 形如 'S0-2'（第1个搜索词的第3条）。
   // resolve key 数组（空数组=AI 判定无需深抓）；重试 2 次后仍请求/解析失败 → resolve null，调用方回退「每词前 searchDeepK 条」。
@@ -2510,6 +2567,7 @@
     const totalBatches = Math.ceil(searchItems.length / BATCH);
     const rows = [];     // 每个搜索项一行：{ label, text（浅搜摘要文本）, keys（该词全部条目 key，顺序同 items） }
     const candRows = []; // 全局候选池：{ key, label, wordIdx, title, url, snippet }，key='S'+词下标+'-'+条目下标
+    const seenCandidate = Object.create(null); // 归一化 URL → true，跨词去重用
     resetSearchSummary();
     let sumOk = 0;
     let sumFail = 0;
@@ -2547,7 +2605,13 @@
         items.forEach((it, j) => {
           const key = 'S' + wordIdx + '-' + j;
           keys.push(key);
-          candRows.push({ key: key, label: batch[idx].label, wordIdx: wordIdx, title: it.title || '', url: it.url || '', snippet: it.snippet || '' });
+          const url = normalizeUrl(it.url || '');
+          // 按归一化 URL 去重：同一页面被多个词搜到（如官方文档同时在 S0-1/S2-0）只进一次候选池，
+          // 避免挑选清单重复、AI 误选两次、深抓同一页两遍
+          if (url && !seenCandidate[url]) {
+            seenCandidate[url] = true;
+            candRows.push({ key: key, label: batch[idx].label, wordIdx: wordIdx, title: it.title || '', url: url, snippet: it.snippet || '' });
+          }
         });
         rows.push({ label: batch[idx].label, text: r.text, keys: keys, items: items }); // items 存结构化条目，回填阶段按 key 精准重建摘要行
       });
@@ -2559,6 +2623,28 @@
       const doneCnt = Math.min(i + BATCH, searchItems.length);
       const msg = '📦 搜索' + (doneAll ? '完成' : '中') + '：' + sumOk + ' 词成功' + (sumFail ? (' · ' + sumFail + ' 词失败') : '') + (doneAll ? '' : ('（' + doneCnt + '/' + searchItems.length + '）')) + '（点开看全部结果）';
       updateSearchSummary(msg, allBatchTips.join('\n\n'), sumFail === 0 ? 'done' : 'warn');
+    }
+
+    // 所有关键词浅搜完成：缓存候选清单（精炼格式），供「📋 候选」按钮复制——此时 rows 已齐、未深抓，
+    // 是用户想拿去给强模型精炼的最佳时点（深抓后的正文不在这份清单里，精炼只针对候选来源）
+    lastCandidatesTxt = buildCandidatesTxt(rows);
+    if (lastCandidatesTxt && logBodyEl) {
+      // 追加一条「📋 候选」行：点击复制候选清单（对接搜索素材精炼提示词的手动工作流）
+      const candLine = document.createElement('div');
+      candLine.className = 'lsb-ai-log-line';
+      const idx = document.createElement('span');
+      idx.className = 'lsb-ai-log-idx';
+      idx.textContent = String(logIdx).padStart(2, '0');
+      candLine.appendChild(idx);
+      const candBtn = document.createElement('span');
+      candBtn.className = 'lsb-ai-log-more';
+      candBtn.textContent = '📋 候选';
+      candBtn.title = '复制候选清单（搜索素材精炼格式），供强模型二次精炼';
+      candBtn.addEventListener('click', () => copyTextToClipboard(lastCandidatesTxt, candBtn));
+      candLine.appendChild(candBtn);
+      candLine.appendChild(document.createTextNode('📦 候选清单已就绪：点上方「📋 候选」复制给强模型精炼'));
+      logBodyEl.appendChild(candLine);
+      if (logNearBottom()) logBodyEl.scrollTop = logBodyEl.scrollHeight;
     }
 
     // 全局深抓：收齐全部词的候选后，一次 AI 调用跨词挑选值得看正文的条目 → 逐条深抓 → 按 key 回填。
@@ -2649,10 +2735,14 @@
 
     // 阶段4：汇总生成（不带搜索工具，附上下文约束纠错指导）
     progress('搜索完成，正在汇总生成回帖…');
-    // 汇总护栏：AI 挑选条数已自由化（0-10 条，不写死引导），护栏只作「防极端爆窗」兜底——
-    // 放宽到 28000 字（约 7 条满长文或 10 条短文），让 AI 的正常判断基本不触顶；
-    // 靠前关键词的搜索结果优先保留，真超了才截断
-    const SEARCH_SUMMARY_LIMIT = 28000;
+    // 汇总护栏：AI 挑选条数已自由化（0-10 条，不写死引导），护栏只作「防极端爆窗」兜底。
+    // 此前写死 28000，但 maxContextChars（默认 20000 帖子正文）从不约束搜索块，
+    // 28000 搜索块 + 20000 正文 + 系统提示会叠到 ~28000-48000 字（≈4-7 万 token）。
+    // 改为动态护栏：搜索块上限与 maxContextChars 严格对齐（正文与搜索块各占一份预算，
+    // 合计 ≈ 2×maxContextChars，随用户设置的窗口自动缩放），不设硬上限；
+    // 真超了才截断，靠前关键词优先保留
+    const searchCap = Math.max(4000, Math.floor((cfg.maxContextChars || 20000) * 1.0));
+    const SEARCH_SUMMARY_LIMIT = searchCap;
     const rawSearchBlock = searchTexts.join('\n\n');
     const clippedSearch = rawSearchBlock.length > SEARCH_SUMMARY_LIMIT
       ? rawSearchBlock.slice(0, SEARCH_SUMMARY_LIMIT) + '\n\n……（搜索结果总量超 ' + SEARCH_SUMMARY_LIMIT + ' 字已截断，以上为保留部分）'
@@ -2661,6 +2751,8 @@
     const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
     const r = await stopRace(streamFinal(req));
     checkStop();
+    // 缓存候选清单（精炼格式），供「📋 候选」按钮复制给强模型二次精炼
+    lastCandidatesTxt = buildCandidatesTxt(rows);
     return { text: r.text, searched: true };
   }
 
