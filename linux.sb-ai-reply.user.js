@@ -1916,14 +1916,14 @@
   }
   function decodeGNewsUrl(url, timeoutSec) {
     let u = null;
-    try { u = new URL(url); } catch (e) { return Promise.resolve(''); }
-    if (!/(^|\.)news\.google\.com$/i.test(u.hostname)) return Promise.resolve('');
+    try { u = new URL(url); } catch (e) { return Promise.resolve({ url: '', note: 'URL 解析失败' }); }
+    if (!/(^|\.)news\.google\.com$/i.test(u.hostname)) return Promise.resolve({ url: '', note: '非 GN 链接' });
     const parts = u.pathname.split('/');
     const ai = parts.indexOf('articles');
     const id = ai >= 0 ? parts[ai + 1] : parts[parts.length - 1];
-    if (!id) return Promise.resolve('');
+    if (!id) return Promise.resolve({ url: '', note: '未取到文章 ID' });
     const offline = decodeGNewsIdOffline(id); // 旧格式零请求直接得原站
-    if (offline) return Promise.resolve(offline);
+    if (offline) return Promise.resolve({ url: offline, note: '离线解码' });
     // 新格式：batchexecute 换原站 URL（模板与 rpcids 为社区验证过的固定值）
     const payload = '[[["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"' + id + '\\"]",null,"generic"]]]';
     return new Promise((resolve) => {
@@ -1934,19 +1934,20 @@
         headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8', 'Referer': 'https://news.google.com/' },
         data: 'f.req=' + encodeURIComponent(payload),
         onload: (resp) => {
+          if (!(resp.status >= 200 && resp.status < 300)) { resolve({ url: '', note: 'batchexecute HTTP' + resp.status }); return; }
           const txt = resp.responseText || '';
           const header = '["garturlres","';
           const fi = txt.indexOf(header);
-          if (fi === -1) { resolve(''); return; }
+          if (fi === -1) { resolve({ url: '', note: '无garturlres:' + txt.slice(0, 90).replace(/\s+/g, ' ') }); return; }
           const rest = txt.slice(fi + header.length);
           const end = rest.indexOf('",');
-          if (end === -1) { resolve(''); return; }
+          if (end === -1) { resolve({ url: '', note: 'garturlres 未闭合' }); return; }
           const real = rest.slice(0, end).replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-          resolve(/^https?:\/\//i.test(real) ? real : '');
+          resolve(/^https?:\/\//i.test(real) ? { url: real, note: 'batchexecute 解码' } : { url: '', note: '解码结果非 URL' });
         },
-        onerror: () => resolve(''),
-        ontimeout: () => resolve(''),
-        onabort: () => resolve('')
+        onerror: () => resolve({ url: '', note: 'batchexecute 网络错误' }),
+        ontimeout: () => resolve({ url: '', note: 'batchexecute 超时' }),
+        onabort: () => resolve({ url: '', note: '已取消' })
       });
     });
   }
@@ -2832,19 +2833,22 @@
         if (!c) continue;
         if (isSameSite(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true }); continue; }
         if (isDeepBlocked(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true, info: '强反爬站，保留摘要' }); continue; }
+        const diag = []; // GN 解码/换源过程诊断（失败明细里展示，便于定位环节）
         try {
           // Google News 中转链接：优先解码出原站 URL（社区两层方案），失败再用标题换源定位
           let targetUrl = c.url;
           let host0 = '';
           try { host0 = new URL(c.url).hostname; } catch (e) { /* 保持空 */ }
           if (/(^|\.)news\.google\.com$/i.test(host0)) {
-            const decoded = await stopRace(decodeGNewsUrl(c.url, 12));
+            const dec = await stopRace(decodeGNewsUrl(c.url, 12));
             checkStop();
-            if (decoded) targetUrl = decoded;
+            if (dec && dec.url) { targetUrl = dec.url; diag.push('解码成功(' + dec.note + ')'); }
             else {
+              diag.push('解码失败(' + ((dec && dec.note) || '未知') + ')');
               const located = await stopRace(locateNewsSource(cfg, c.title));
               checkStop();
-              if (located) targetUrl = located;
+              if (located) { targetUrl = located; diag.push('换源定位→' + (function (u) { try { return new URL(u).hostname; } catch (e) { return u; } })(located)); }
+              else diag.push('换源定位失败');
             }
           }
           const txt = await stopRace(fetchPageText(targetUrl, 12));
@@ -2853,7 +2857,7 @@
           steps.push({ key: key, title: c.title, url: c.url, ok: true, text: txt });
         } catch (e) {
           if (e && e.aborted) throw e;
-          steps.push({ key: key, title: c.title, url: c.url, ok: false, info: (e && e.message) || '失败' });
+          steps.push({ key: key, title: c.title, url: c.url, ok: false, info: ((diag && diag.length) ? (diag.join('；') + '；') : '') + ((e && e.message) || '失败') });
         }
       }
       // 深抓过程不逐条刷视奸窗（太杂），完成后只落一行汇总，tip 挂全部明细（hover/点击固定可看正文全文）
