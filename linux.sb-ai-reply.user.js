@@ -115,6 +115,7 @@
     searchTopK: 8, // 客户端直搜时，每个关键词取前 N 条结果（宽进：候选池大，AI 全局挑选再决定深抓哪些）
     searchDeepK: 2, // 深抓正文：对前 N 条结果再抓一次目标网页正文（0=关闭，仅用搜索引擎摘要；1-3 控制条数）
     searchBatch: 3, // 联网搜索并行批大小（每批同时发几个搜索子请求）
+    searchTimeout: 12, // 单条搜索请求超时（秒）。搜索是快请求，与 LLM 的 requestTimeout 分开：源挂死时快速失败降级，不拖慢整批
     requestTimeout: 180, // 单次请求超时（秒）
     maxRetry: 2 // 可重试失败的最大重试次数（网络/超时/503 等）
   };
@@ -666,9 +667,11 @@
     cfg.maxTokens = Number(cfg.maxTokens);
     cfg.maxContextChars = Number(cfg.maxContextChars);
     cfg.searchBatch = Number(cfg.searchBatch);
+    cfg.searchTimeout = Number(cfg.searchTimeout);
     cfg.requestTimeout = Number(cfg.requestTimeout);
     cfg.maxRetry = Number(cfg.maxRetry);
     if (!(cfg.searchBatch >= 1)) cfg.searchBatch = DEFAULTS.searchBatch;
+    if (!(cfg.searchTimeout >= 3)) cfg.searchTimeout = DEFAULTS.searchTimeout;
     cfg.searchTopK = Number(cfg.searchTopK);
     if (!(cfg.searchTopK >= 1)) cfg.searchTopK = DEFAULTS.searchTopK;
     cfg.searchDeepK = Number(cfg.searchDeepK);
@@ -1586,15 +1589,17 @@
     return [{ type: 'web_search' }];
   }
 
-  // 客户端 UA 伪装（AgentRouter 等中转站按 UA 白名单放行，实测 Cline/ 前缀可用，版本号任意）
   // ===== 客户端直连搜索引擎（方案：不依赖中转站内置 web_search，免 API Key）=====
-  // 实测（国内网络）：cn.bing.com 直连约 1.4s、结果准确，作为默认；
-  // DuckDuckGo 的 html 端点连续请求易返回 HTTP 202 反爬挑战页，仅作备用；
-  // s.jina.ai 已强制要 Key、百度网页端直抓会跳验证页，故不内置。
-  // 依赖 GM_xmlhttpRequest 跨域（@connect 现为 * 已覆盖；若收紧权限，需放行 cn.bing.com / html.duckduckgo.com）。
+  // 实测（2026-09-10，用户网络）：
+  //  · www.bing.com  直连 0.78s / 走代理 0.7~5.8s，两种模式都稳定返回 ~10 条结果 → 首选
+  //  · cn.bing.com   直连正常，但走代理（香港节点）会被降级成「必应首页」（0 结果）→ 已弃用
+  //  · DuckDuckGo    html 端点长期不可达：其域名被 GFW DNS 投毒（本地/阿里/腾讯 DNS 均返回
+  //                  Dropbox/Facebook 网段 IP），且 Clash fallback-filter 的域名白名单未含
+  //                  duckduckgo.com → 投毒 IP 未被判定为污染 → 连到错主机 → 超时 → 仅作末位兜底
+  // 依赖 GM_xmlhttpRequest 跨域（@connect 现为 * 已覆盖；若收紧权限，需放行 www.bing.com / html.duckduckgo.com）。
   const CLIENT_SEARCH_ENGINES = {
     bing: {
-      buildUrl: (q) => 'https://cn.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=zh-CN&ensearch=0&count=25', // count=25：宽进搜索结果，由 pickGlobal 全局挑选再严出
+      buildUrl: (q) => 'https://www.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=zh-CN&ensearch=0&count=25', // count=25：宽进搜索结果，由 pickGlobal 全局挑选再严出
       parse: (doc, k) => {
         const out = [];
         doc.querySelectorAll('li.b_algo').forEach((li) => {
@@ -1638,15 +1643,18 @@
       label: '官方 API 多源聚合（技术向·免Key·零反爬）'
     },
     // smart：按查询语言自动路由（推荐默认）——
-    // 中文词：DDG(通用网页) → Google News(中文资讯) → Bing；英文词：SO+GitHub+HN → DDG → Bing
+    // 中文词：Bing ‖ Google News 并行竞速（先成功者胜）→ DDG 末位熔断；
+    // 英文词：SO+GitHub+HN 并行 → Bing → DDG
     smart: {
       smart: true,
-      label: '智能路由（中英分流·DDG 通用兜底→Bing 终兜）'
+      label: '智能路由（中英分流·Bing/News 并行竞速·DDG 末位熔断）'
     }
   };
   // SearXNG 公共实例池（内存轮换序：成功实例被提到队首）
   const SEARX_INSTANCES = ['https://searx.be', 'https://search.bus-hit.me', 'https://searx.tiekoetter.com', 'https://priv.au'];
   let searxOrder = SEARX_INSTANCES.slice();
+  // DDG 会话级熔断计数（一轮搜索内连续失败达阈值即跳过 DDG，避免反复卡超时；每轮开始时重置）
+  let ddgFailStreak = 0;
 
   // multi 引擎的子源定义（实测可达：hn.algolia / api.stackexchange / api.github / news.google RSS）
   const MULTI_SOURCES = [
@@ -2128,7 +2136,9 @@
     const engineName = CLIENT_SEARCH_ENGINES[cfg.searchEngine] ? cfg.searchEngine : 'bing';
     const engine = CLIENT_SEARCH_ENGINES[engineName];
     const topK = (Number(cfg.searchTopK) >= 1 ? Math.floor(Number(cfg.searchTopK)) : 6);
-    const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 30); // 搜索是快请求，封顶 30s
+    // 搜索是快请求：用独立的 searchTimeout（默认 12s），不跟 LLM 的 requestTimeout(180s) 混用。
+    // 源挂死（如 DDG 现长期不可达）时快速失败降级，避免整批被一条卡满超时拖住。
+    const timeoutSec = Math.min((Number(cfg.searchTimeout) >= 3 ? Number(cfg.searchTimeout) : 12), 60);
     // 实例尝试顺序：searx 时 = [自定义实例(若填)] + 内置轮换池；HTML 引擎 = 单个
     const customInst = (cfg.searchSearxInstance || '').trim();
     const attemptBases = engine.json
@@ -2188,21 +2198,51 @@
           }
           return out.slice(0, topK);
         };
+        // DDG 熔断器：html 端点已长期不可达（直连失败 / 走代理卡满超时）。同一轮搜索内连续失败 2 次即熔断，
+        // 后续关键词直接跳过——避免 16 个词各陪它卡一次超时（这才是「搜得慢」的主因）。跨轮重置，DDG 恢复后可自动用回。
+        const tryDdg = (q) => {
+          if (ddgFailStreak >= 2) return Promise.resolve({ ok: false, err: '已熔断(本轮连续' + ddgFailStreak + '次失败)' });
+          return fetchItems(ddgE.buildUrl(q), htmlParse(ddgE), 'DDG').then((r) => { if (!r.ok) ddgFailStreak += 1; return r; });
+        };
+        // 并行竞速：多源同时发，谁先成功用谁（先到先得）；若在 graceMs 内另一路也成功则合并（多源覆盖更好）。
+        // 用于「互斥可用」的源组合（如直连下 Bing 可用而 Google 被墙、走代理下反之）——避免串行硬等慢源。
+        const raceFirstOk = (producers, graceMs) => new Promise((res) => {
+          let first = null;
+          let settled = 0;
+          let timer = null;
+          const finish = (v) => { if (timer) { clearTimeout(timer); timer = null; } res(v); };
+          producers.forEach((p) => p.then((r) => {
+            settled += 1;
+            if (r && r.ok) {
+              const tagged = r.items.map((it) => Object.assign({}, it, { src: r.tag }));
+              if (!first) {
+                first = tagged;
+                if (graceMs > 0) timer = setTimeout(() => finish(first), graceMs); else finish(first);
+              } else finish(first.concat(tagged));
+            } else if (settled === producers.length && !first) finish(null);
+          }));
+        });
         (async () => {
           try {
             checkStop();
             let items = null;
             const tagItems = (arr, tag) => arr.map((it) => Object.assign({}, it, { src: tag }));
             if (isCJK) {
-              const ddgR = await fetchItems(ddgE.buildUrl(query), htmlParse(ddgE), 'DDG');
+              // 中文链路（实测重排 + 并行竞速）：
+              //   · www.bing.com 直连/走代理都稳定可用（0.7~5.8s，~10 条），作主源；
+              //   · Google News 中文资讯强（原站链接还能走深抓解码），作并行补充/兜底；
+              // 两路并行、先成功者胜（另加 0.8s 宽限合并），任何网络环境下都能在 ~1~7s 出结果。
+              // DDG 原为中文首选，其域名被 DNS 投毒导致长期不可达 → 降为末位兜底 + 会话级熔断。
+              const picked = await raceFirstOk([
+                fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing').then((r) => { if (!r.ok) errLog.push('Bing:' + (r.err || '失败')); return r; }),
+                fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN').then((r) => { if (!r.ok) errLog.push('GN:' + (r.err || '失败')); return r; })
+              ], 800);
               checkStop();
-              if (ddgR.ok) items = tagItems(ddgR.items, 'DDG');
-              else {
-                errLog.push('DDG:' + (ddgR.err || '失败'));
-                const newsR = await fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN');
-                checkStop();
-                if (newsR.ok) items = tagItems(newsR.items, 'GN');
-                else errLog.push('GN:' + (newsR.err || '失败'));
+              if (picked && picked.length) items = mergeItems([picked]);
+              if (!items || !items.length) {
+                const ddgR = await tryDdg(query);
+                if (ddgR && ddgR.ok) items = tagItems(ddgR.items, 'DDG');
+                else errLog.push('DDG:' + ((ddgR && ddgR.err) || '失败'));
               }
             } else {
               const outs = await Promise.all(jsonSrcs.map((src) => fetchItems(src.build(query), (txt) => src.extract(JSON.parse(txt)), src.id.toUpperCase())));
@@ -2211,18 +2251,17 @@
               if (ok.length) items = mergeItems(ok.map((o) => tagItems(o.items, o.tag)));
               else {
                 outs.forEach((o) => errLog.push(o.tag + ':' + (o.err || '失败')));
-                // 英文垂直源空 → DDG 兜底（通用网页/英文索引更全）
-                const ddgR2 = await fetchItems(ddgE.buildUrl(query), htmlParse(ddgE), 'DDG');
+                // 英文垂直源空 → Bing 兜底（通用网页/英文索引更全），再不行才末位 DDG
+                const bingR2 = await fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing');
                 checkStop();
-                if (ddgR2.ok) items = tagItems(ddgR2.items, 'DDG');
-                else errLog.push('DDG:' + (ddgR2.err || '失败'));
+                if (bingR2.ok) items = tagItems(bingR2.items, 'Bing');
+                else errLog.push('Bing:' + (bingR2.err || '失败'));
+                if (!items || !items.length) {
+                  const ddgR2 = await tryDdg(query);
+                  if (ddgR2 && ddgR2.ok) items = tagItems(ddgR2.items, 'DDG');
+                  else errLog.push('DDG:' + ((ddgR2 && ddgR2.err) || '失败'));
+                }
               }
-            }
-            if (!items || !items.length) {
-              const bingR = await fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing');
-              checkStop();
-              if (bingR.ok) items = tagItems(bingR.items, 'Bing');
-              else errLog.push('Bing:' + (bingR.err || '失败'));
             }
             if (!items || !items.length) {
               reject(new Error('搜索失败：smart 各层均不可用[' + (errLog.join('；') || '未知') + ']，可换搜索源重试'));
@@ -2341,6 +2380,7 @@
     });
   }
 
+  // 客户端 UA 伪装（AgentRouter 等中转站按 UA 白名单放行，实测 Cline/ 前缀可用，版本号任意）
   const CLIENT_UA = 'Cline/3.0.0';
 
   // 构造三格式请求（url/headers/body），opts: { system, userContent, images, tools }
@@ -2799,6 +2839,7 @@
     const candRows = []; // 全局候选池：{ key, label, wordIdx, title, url, snippet }，key='S'+词下标+'-'+条目下标
     const seenCandidate = Object.create(null); // 归一化 URL → true，跨词去重用
     resetSearchSummary();
+    ddgFailStreak = 0; // 每轮搜索重新试探 DDG（上一轮熔断不带入本轮）
     let sumOk = 0;
     let sumFail = 0;
     const allBatchTips = []; // 全部批次的词结果段，累积进汇总行 tip
@@ -3372,6 +3413,7 @@
       maxTokens: num('maxTokens', DEFAULTS.maxTokens),
       maxContextChars: num('maxContextChars', DEFAULTS.maxContextChars),
       searchBatch: Math.max(1, num('searchBatch', DEFAULTS.searchBatch)),
+      searchTimeout: Math.max(3, num('searchTimeout', DEFAULTS.searchTimeout)),
       requestTimeout: Math.max(5, num('requestTimeout', DEFAULTS.requestTimeout)),
       maxRetry: Math.max(0, num('maxRetry', DEFAULTS.maxRetry)),
       includeSpeaker: $('includeSpeaker').checked,
@@ -3394,6 +3436,7 @@
     $('maxTokens').value = cfg.maxTokens;
     $('maxContextChars').value = cfg.maxContextChars;
     $('searchBatch').value = cfg.searchBatch;
+    if ($('searchTimeout')) $('searchTimeout').value = cfg.searchTimeout;
     $('searchTopK').value = cfg.searchTopK;
     if ($('searchDeepK')) $('searchDeepK').value = cfg.searchDeepK;
     $('requestTimeout').value = cfg.requestTimeout;
@@ -3852,6 +3895,10 @@
                 <label class="lsb-ai-label">失败重试次数</label>
                 <input class="lsb-ai-input" id="lsb-ai-cfg-maxRetry" type="number" min="0" step="1">
               </div>
+              <div class="lsb-ai-row">
+                <label class="lsb-ai-label">搜索超时（秒）</label>
+                <input class="lsb-ai-input" id="lsb-ai-cfg-searchTimeout" type="number" min="3" step="1">
+              </div>
             </div>
             <div class="lsb-ai-check-row">
               <input type="checkbox" id="lsb-ai-cfg-includeSpeaker">
@@ -3868,7 +3915,7 @@
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">联网搜索源</label>
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
-                <option value="smart">智能路由（推荐·中英分流·DDG/News/SO/HN/GH+Bing 兜底）</option>
+                <option value="smart">智能路由（推荐·中英分流·Bing/News 并行竞速·DDG 末位熔断）</option>
                 <option value="bing">Bing 直连（通用兜底·结果偏杂）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
               </select>
