@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.5
+// @version      2.11.6
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1648,6 +1648,25 @@
     return d.getFullYear() === n.getFullYear() ? (mm + '-' + dd) : (d.getFullYear() + '-' + mm + '-' + dd);
   }
 
+  // Brave 只给相对时间（"1 month ago" / "3 weeks ago"），换算成大约的绝对日期并加「约」前缀。
+  // 为什么换算：绝对日期才能和别的源（GN/BingNews 的 pubDate）放在一起比较新旧；
+  // 为什么加「约」：Brave 的粒度到月/周，本来就是估算，不能冒充精确日期。
+  function fmtRelativeDate(raw, now) {
+    const m = /(\d+)\s*(hour|day|week|month|year)s?\s*ago/i.exec(String(raw || ''));
+    if (!m) return '';
+    const n = Number(m[1]);
+    const unit = m[2].toLowerCase();
+    const base = now || new Date();
+    const d = new Date(base.getTime());
+    if (unit === 'hour') d.setHours(d.getHours() - n);
+    else if (unit === 'day') d.setDate(d.getDate() - n);
+    else if (unit === 'week') d.setDate(d.getDate() - n * 7);
+    else if (unit === 'month') d.setMonth(d.getMonth() - n);
+    else d.setFullYear(d.getFullYear() - n);
+    const s = fmtPubDate(d.toISOString(), base);
+    return s ? ('约' + s) : '';
+  }
+
   // 给搜索结果统一加「[媒体名] 」摘要前缀。日期不塞在这里——它由各渲染处统一以 (MM-DD) 标在标题前
   // （搜索明细卡片 / 最终上下文 / 深抓明细），那样更显眼，也不会在摘要里再重复一遍占字数。
   function decorateResult(it) {
@@ -1724,10 +1743,17 @@
           const title = tEl ? (tEl.textContent || '').trim() : '';
           const dEl = box.querySelector('.generic-snippet .content') || box.querySelector('.snippet-description');
           let snippet = dEl ? (dEl.textContent || '').trim() : '';
-          // 保留开头的相对时间（"1 month ago -"）：它正是判断素材新旧的依据，不再剥掉
           snippet = snippet.replace(/\s+/g, ' ').trim();
+          // Brave 把发布时间放在摘要开头（形如 "1 month ago - "），转成大约日期做标记后从摘要里去掉；
+          // 转换失败（拿不到日期）则原样保留，信息不丢
+          let date = '';
+          const relM = /^(\d+\s*(?:hour|day|week|month|year)s?\s*ago)\s*[-–]\s*/i.exec(snippet);
+          if (relM) {
+            date = fmtRelativeDate(relM[1]);
+            if (date) snippet = snippet.slice(relM[0].length);
+          }
           if (!url || (!title && !snippet)) return;
-          out.push({ title: title, url: url, snippet: snippet });
+          out.push({ title: title, url: url, snippet: snippet, date: date });
         });
         return out.slice(0, k);
       }
