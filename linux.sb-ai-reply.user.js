@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.2
+// @version      2.11.3
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1634,6 +1634,29 @@
     return SPAM_DOMAINS.some((d) => hosts.some((h) => h === d || h.endsWith('.' + d)));
   }
 
+  // 把 RSS 的 pubDate / 各种日期串压成短标记：本年只给「MM-DD」，跨年补成「YYYY-MM-DD」。
+  // 用途见 decorateResult：搜索结果里常混入方向相反的旧闻（实测「DeepSeek 降价」话题会掺进
+  // 一个月前的「涨价」新闻），没有日期模型就无法判断新旧，容易写出自相矛盾的内容。
+  function fmtPubDate(raw, now) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return '';
+    const n = now || new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() === n.getFullYear() ? (mm + '-' + dd) : (d.getFullYear() + '-' + mm + '-' + dd);
+  }
+
+  // 给搜索结果统一加「[媒体名 · 日期] 」摘要前缀（如 [第一财经 · 09-09]）。
+  // 放在摘要最前面而非标题里：① 标题的开头位置要留给 [来源徽标] 的解析正则；
+  // ② 最终上下文对摘要截 150 字，前缀在开头不会被截掉；③ 模型和用户在深抓明细里都能一眼看到新旧。
+  function decorateResult(it) {
+    const meta = [it.siteName, it.date].filter(Boolean).join(' · ');
+    if (!meta) return it;
+    return Object.assign({}, it, { snippet: '[' + meta + '] ' + (it.snippet || '') });
+  }
+
   // ===== 客户端直连搜索引擎（方案：不依赖中转站内置 web_search，免 API Key）=====
   // 实测（2026-09-10，用户网络）：
   //  · www.bing.com  直连 0.78s / 走代理 0.7~5.8s，两种模式都稳定返回 ~10 条结果 → 首选
@@ -1673,7 +1696,14 @@
           if (href.indexOf('//') === 0) href = 'https:' + href;
           if (!/^https?:/i.test(href)) return;
           const s = box.querySelector('.result__snippet') || box.querySelector('.result__body');
-          out.push({ title: (a.textContent || '').trim(), url: href, snippet: s ? (s.textContent || '').trim() : '' });
+          // DDG 部分结果带 .result__timestamp（如 "Sep 9, 2026"），取出来做日期标注
+          const tsEl = box.querySelector('.result__timestamp');
+          out.push({
+            title: (a.textContent || '').trim(),
+            url: href,
+            snippet: s ? (s.textContent || '').trim() : '',
+            date: tsEl ? fmtPubDate(tsEl.textContent) : ''
+          });
         });
         return out.slice(0, k);
       }
@@ -1696,7 +1726,8 @@
           const title = tEl ? (tEl.textContent || '').trim() : '';
           const dEl = box.querySelector('.generic-snippet .content') || box.querySelector('.snippet-description');
           let snippet = dEl ? (dEl.textContent || '').trim() : '';
-          snippet = snippet.replace(/^\s*\d+\s*(?:hour|day|week|month|year)s?\s*ago\s*[-–]\s*/i, '').replace(/\s+/g, ' ').trim();
+          // 保留开头的相对时间（"1 month ago -"）：它正是判断素材新旧的依据，不再剥掉
+          snippet = snippet.replace(/\s+/g, ' ').trim();
           if (!url || (!title && !snippet)) return;
           out.push({ title: title, url: url, snippet: snippet });
         });
@@ -1790,13 +1821,20 @@
           const sEl = it.querySelector('source');
           const site = sEl ? (sEl.getAttribute('url') || '') : '';
           const siteName = sEl ? (sEl.textContent || '').trim() : '';
+          const pEl = it.querySelector('pubDate');
           let desc = (d ? d.textContent || '' : '');
-          desc = desc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+          desc = desc.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+          // GN 的 description 实际是「标题 + 媒体名」的副本（XML 里 &nbsp; 还会以字面量漏进来）：
+          // 媒体名已由 decorateResult 统一标进前缀，这里把它从摘要尾部去掉，避免重复占上下文
+          if (siteName && desc.endsWith(siteName)) desc = desc.slice(0, -siteName.length).trim();
+          if (desc === t.textContent.trim()) desc = ''; // 整段就是标题的重复 → 不留摘要
           out.push({
             title: t.textContent.trim(),
             url: l.textContent.trim(),
-            snippet: (siteName ? '[' + siteName + '] ' : '') + desc.slice(0, 200),
-            site: site
+            snippet: desc.slice(0, 200),
+            site: site,
+            siteName: siteName,
+            date: fmtPubDate(pEl ? pEl.textContent : '')
           });
         });
         return out;
@@ -1833,7 +1871,13 @@
         const src = unesc(pick('News:Source')).trim();
         const desc = unesc(pick('description')).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
         if (!title || !link) continue;
-        out.push({ title: title, url: link, snippet: (src ? '[' + src + '] ' : '') + desc.slice(0, 200) });
+        out.push({
+          title: title,
+          url: link,
+          snippet: desc.slice(0, 200),
+          siteName: src,
+          date: fmtPubDate(unesc(pick('pubDate')))
+        });
       }
       return out;
     }
@@ -2270,10 +2314,13 @@
       ? (customInst ? [customInst].concat(searxOrder.filter((x) => x !== customInst)) : searxOrder.slice())
       : [null];
     const finish = (raw, resolve, reject) => {
-      // 兜底过滤博彩/引流垃圾（智能路由已在解析处过滤；这里覆盖单引擎 / multi 等其余路径）
+      // 这里是所有搜索路径（智能路由 / 单引擎 / multi）的唯一出口：
+      // ① 过滤博彩/引流垃圾（智能路由已在解析处过滤，这里覆盖其余路径）；
+      // ② 统一加「[媒体名 · 日期]」摘要前缀——只在此处施加，避免重复叠加
       const items = raw
         .map((it) => (it.src ? it : Object.assign({}, it, { src: engineName })))
-        .filter((it) => !isSpamResult(it.title, it.url, it.site));
+        .filter((it) => !isSpamResult(it.title, it.url, it.site))
+        .map(decorateResult);
       if (!items.length) { reject(new Error('无结果（可能被搜索引擎反爬拦截，可换搜索源重试）')); return; }
       const text = items.map((it, i) => {
         const sn = (it.snippet || '').length > 300 ? it.snippet.slice(0, 300) + '…' : (it.snippet || '');
@@ -3080,7 +3127,7 @@
           // 避免挑选清单重复、AI 误选两次、深抓同一页两遍
           if (url && !seenCandidate[url]) {
             seenCandidate[url] = true;
-            candRows.push({ key: key, label: batch[idx].label, wordIdx: wordIdx, title: it.title || '', url: url, snippet: it.snippet || '' });
+            candRows.push({ key: key, label: batch[idx].label, wordIdx: wordIdx, title: it.title || '', url: url, snippet: it.snippet || '', date: it.date || '' });
           }
         });
         rows.push({ label: batch[idx].label, text: r.text, keys: keys, items: items }); // items 存结构化条目，回填阶段按 key 精准重建摘要行
@@ -3125,8 +3172,8 @@
         checkStop(); // 被停止则立即退出深抓
         const c = byKey[key];
         if (!c) continue;
-        if (isSameSite(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true }); continue; }
-        if (isDeepBlocked(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true, info: '强反爬站，保留摘要' }); continue; }
+        if (isSameSite(c.url)) { steps.push({ key: key, title: c.title, url: c.url, date: c.date, ok: false, skip: true }); continue; }
+        if (isDeepBlocked(c.url)) { steps.push({ key: key, title: c.title, url: c.url, date: c.date, ok: false, skip: true, info: '强反爬站，保留摘要' }); continue; }
         const diag = []; // GN 解码/换源过程诊断（失败明细里展示，便于定位环节）
         try {
           // Google News 中转链接：优先解码出原站 URL（社区两层方案），失败再用标题换源定位
@@ -3148,10 +3195,10 @@
           const txt = await stopRace(fetchPageText(targetUrl, 12));
           checkStop();
           deepMap[key] = txt;
-          steps.push({ key: key, title: c.title, url: c.url, ok: true, text: txt });
+          steps.push({ key: key, title: c.title, url: c.url, date: c.date, ok: true, text: txt });
         } catch (e) {
           if (e && e.aborted) throw e;
-          steps.push({ key: key, title: c.title, url: c.url, ok: false, info: ((diag && diag.length) ? (diag.join('；') + '；') : '') + ((e && e.message) || '失败') });
+          steps.push({ key: key, title: c.title, url: c.url, date: c.date, ok: false, info: ((diag && diag.length) ? (diag.join('；') + '；') : '') + ((e && e.message) || '失败') });
         }
       }
       // 深抓过程不逐条刷视奸窗（太杂），完成后只落一行汇总，tip 挂全部明细（hover/点击固定可看正文全文）
@@ -3161,7 +3208,10 @@
         const skipN = steps.filter((s) => s.skip).length;
         const detail = steps.map((s, k) => {
           const st = s.ok ? ('✅正文 ' + s.text.length + ' 字') : (s.skip ? '⏭ 本站页面跳过' : ('❌' + (s.info || '失败') + '（保留摘要）'));
-          return '[' + (k + 1) + '] ' + (s.title || '') + ' ' + st + '\n@' + s.key + '  链接：' + s.url + (s.text ? ('\n\n' + s.text) : '');
+          // 标题前标出发布时间：素材常混入旧闻（如「降价」话题掺进一个月前的「涨价」），
+          // 有日期才能一眼看出新旧，避免据此写出自相矛盾的内容
+          const dt = s.date ? ('(' + s.date + ') ') : '';
+          return '[' + (k + 1) + '] ' + dt + (s.title || '') + ' ' + st + '\n@' + s.key + '  链接：' + s.url + (s.text ? ('\n\n' + s.text) : '');
         }).join('\n\n');
         deepLog('  🕳 深抓完成：成功 ' + okN + ' · 失败 ' + badN + ' · 跳过 ' + skipN + '（点开看明细）', '深抓明细：\n\n' + detail);
       }
