@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.8
+// @version      2.11.9
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1806,16 +1806,24 @@
   // 动机：中转站上游饱和时重试几乎必然再失败，不如让用户等一会儿手动重试，且不白扔已完成的阶段。
   let pendingResume = null;
 
+  // 轻量字符串哈希（FNV-1a）：签名里用它给 rawText / finalUserContent 取指纹。
+  // 比「长度 + 头尾片段」稳——长度相同、头尾相同但中段不同（例如换了目标评论）也能识别出来。
+  function hashStr(s) {
+    let h = 2166136261;
+    const t = String(s || '');
+    for (let i = 0; i < t.length; i++) {
+      h ^= t.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h;
+  }
   // 检查点签名：只有「同一篇帖子 + 同一模式 + 同一组搜索/模型配置」才认。
-  // rawText 区分换帖；finalUserContent（调用方拼好的内容，含语气、投票强制立场等）取长度+尾部，
-  // 保证「改了立场/换了语气」这类改动会让旧存档失效；systemPrompt 区分水评论/水投票
-  // （投票模式会把 systemPrompt 换成 VOTE_SYSTEM_PROMPT）。不一致就丢弃，避免错配。
+  // rawText / finalUserContent 的指纹区分换帖、换目标评论、改语气、改投票强制立场；
+  // systemPrompt 区分水评论/水投票（投票模式会把 systemPrompt 换成 VOTE_SYSTEM_PROMPT）。
+  // 不一致就丢弃，避免把上一次的结果错配到这一次。
   function resumeSignature(cfg, rawText, finalContent) {
-    const t = String(rawText || '');
-    const f = String(finalContent || '');
     return JSON.stringify([
-      t.length, t.slice(0, 300), t.slice(-100),
-      f.length, f.slice(-200),
+      hashStr(rawText), hashStr(finalContent),
       cfg.enableSearch ? 1 : 0, cfg.searchEngine, cfg.searchTopK, cfg.searchDeepK,
       cfg.searchBatch, cfg.searchTimeout, String(cfg.systemPrompt || '')
     ]);
@@ -1826,6 +1834,9 @@
     const saved = pendingResume;
     pendingResume = null;
     if (saved.sig !== resumeSignature(cfg, rawText, finalContent)) {
+      // 存档与本次不匹配（换帖/换模式/改配置）→ 既然要重新搜，就把上一轮的日志清掉，
+      // 免得新旧两批结果混在一起看岔（续跑成功时是不清的，见 beginRunLog）
+      clearLog();
       appendLog('  ↩ 上次的搜索存档与本次不匹配（换了帖子、换了模式或改了配置），已丢弃，重新搜索', 'warn');
       return null;
     }
@@ -3135,12 +3146,13 @@
     if (resume && resume.stage === 'generate') {
       // 最深一段的存档：搜索与深抓都已完成，只重发汇总生成
       progress('⏩ 从存档点续跑：搜索与深抓结果已就绪，直接重试汇总生成…');
-      appendLog('  ⏩ 已复用上次的搜索结果与深抓正文（未重新搜索、未重新深抓）', 'done');
+      appendLog('───── ⏩ 续跑：复用上面的搜索结果与深抓正文（不重跑已完成阶段）─────', 'done');
       const r2 = await runFinalGeneration(resume.finalContent);
       return { text: r2.text, searched: true };
     }
     if (resume) {
       progress('⏩ 从存档点续跑：跳过规划与搜索，直接重试 AI 挑选…');
+      appendLog('───── ⏩ 续跑：复用上面的搜索结果（跳过规划与重新搜索）─────', 'done');
       ddgFailStreak = 0;
       braveFailStreak = 0;
       braveQueue = Promise.resolve();
@@ -3193,7 +3205,9 @@
     const rows = [];     // 每个搜索项一行：{ label, text（浅搜摘要文本）, keys（该词全部条目 key，顺序同 items） }
     const candRows = []; // 全局候选池：{ key, label, wordIdx, title, url, snippet }，key='S'+词下标+'-'+条目下标
     const seenCandidate = Object.create(null); // 归一化 URL → true，跨词去重用
-    resetSearchSummary();
+    // 续跑时不要重置汇总行引用：beginRunLog 没清空日志，那一行还在，原地更新它即可；
+    // 置空反而会让 updateSearchSummary 再造一行，出现「上一轮汇总 + 续跑汇总」两行冗余
+    if (!resume) resetSearchSummary();
     ddgFailStreak = 0; // 每轮搜索重新试探 DDG（上一轮熔断不带入本轮）
     braveFailStreak = 0; // 同上：Brave 熔断与串行队列每轮重置
     braveQueue = Promise.resolve();
@@ -3445,12 +3459,20 @@
   }
 
   // 「视奸」过程窗：清空 / 追加一行 / 显示 / 隐藏
-  function clearLog() {
-    logIdx = 0;
+  function clearLog() {    logIdx = 0;
     if (logBodyEl) logBodyEl.textContent = '';
     closeLogDetail(); // 清空时关掉可能开着的详情弹窗
 
     searchSummaryLine = null; // 累积行已随清空失效，下次自动重建
+  }
+  // 每轮开始的日志准备。关键：**有待续跑的存档时不清空视奸窗**——
+  // 上一轮的「搜索汇总」行与「深抓明细」正是这次要复用的素材，宏观上属于同一次任务，
+  // 清掉就看不到"复用了什么"了（用户反馈过这个）。
+  // 若存档最终被判不匹配，takePendingResume 会补一次 clearLog，避免新旧结果混在一起。
+  function beginRunLog() {
+    if (!pendingResume) clearLog();
+    showLog(true);
+    if (logWrapEl) logWrapEl.classList.remove('collapsed');
   }
   function showLog(on) {
     if (!logWrapEl) return;
@@ -4667,6 +4689,14 @@
   // 根据有无目标评论，动态更新生成按钮文案
   function updateGenerateBtnText() {
     if (!generateBtn) return;
+    // 待续跑优先：这时点按钮不是「抓取 + 生成」，而是「跳过已完成的阶段继续」，
+    // 文案必须跟着变——否则用户以为又要重跑一遍（状态栏虽有提示，但按钮名字更容易被看到）
+    if (pendingResume) {
+      generateBtn.textContent = (pendingResume.stage === 'generate')
+        ? '⏩ 继续生成（复用搜索与深抓）'
+        : '⏩ 继续生成（复用已搜结果）';
+      return;
+    }
     if (currentMode === 'vote') { generateBtn.textContent = '读帖并生成投票理由'; return; }
     if (currentTarget) {
       const floor = currentTarget.floor ? ('#' + currentTarget.floor + ' ') : '';
@@ -4718,9 +4748,7 @@
     setGenerating(true);
     previewEl.classList.remove('lsb-success');
     previewEl.value = '';
-    clearLog();
-    showLog(true);
-    logWrapEl.classList.remove('collapsed');
+    beginRunLog();
 
     try {
       // 本次生成使用选中的语气提示词（默认第 0 条）
@@ -4789,9 +4817,7 @@
     setGenerating(true);
     previewEl.classList.remove('lsb-success');
     previewEl.value = '';
-    clearLog();
-    showLog(true);
-    logWrapEl.classList.remove('collapsed');
+    beginRunLog();
 
     try {
       const userContent = buildReplyUserContent(scraped.text, scraped.hasMention, {
@@ -4959,7 +4985,7 @@
     previewEl.classList.remove('lsb-success');
     previewEl.value = '';
     lastVoteDecision = null;
-    clearLog(); showLog(true); logWrapEl.classList.remove('collapsed');
+    beginRunLog();
     appendLog('水投票：读取首楼内容，让 AI 判断立场并撰写评议理由…');
     try {
       const stanceSel = document.getElementById('lsb-ai-vote-stance');
