@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.9
+// @version      2.11.10
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -3182,13 +3182,14 @@
       return runFinalGeneration(finalUserContent);
     }
 
-    // 把提炼出的关键词收成一条（点开看清单），避免逐行刷屏
+    // 把提炼出的关键词收成一条（点开看清单），避免逐行刷屏。
+    // 续跑时措辞改成「沿用」——那批词是上次规划好的、这次直接复用，写「提炼出」会让人以为又调了一次规划
     {
       const listTip = pairs.map((p, i) => {
         const fb = (p.fallback && p.fallback !== p.kw) ? (' ↩泛化：' + p.fallback) : '';
         return (i + 1) + '. ' + p.kw + fb;
       }).join('\n');
-      progress('🧠 提炼出 ' + pairs.length + ' 组关键词（点开看清单）', 'kw', listTip);
+      progress((resume ? '🧠 沿用上次的 ' : '🧠 提炼出 ') + pairs.length + ' 组关键词（点开看清单）', 'kw', listTip);
     }
 
     // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，各自独立成一个搜索项）
@@ -3205,9 +3206,11 @@
     const rows = [];     // 每个搜索项一行：{ label, text（浅搜摘要文本）, keys（该词全部条目 key，顺序同 items） }
     const candRows = []; // 全局候选池：{ key, label, wordIdx, title, url, snippet }，key='S'+词下标+'-'+条目下标
     const seenCandidate = Object.create(null); // 归一化 URL → true，跨词去重用
-    // 续跑时不要重置汇总行引用：beginRunLog 没清空日志，那一行还在，原地更新它即可；
-    // 置空反而会让 updateSearchSummary 再造一行，出现「上一轮汇总 + 续跑汇总」两行冗余
-    if (!resume) resetSearchSummary();
+    // 每轮都重置汇总行引用：续跑时**必须**新起一行，绝不能复用上一轮那一行——
+    // updateSearchSummary 是「原地改写文本」，复用会把上一轮「📦 搜索完成：N 词成功」的记录覆盖成
+    // 「复用上次结果」，于是日志读起来像"跑了规划却又说复用"，且上一轮搜了什么也查不到了
+    // （用户实测踩到过）。日志现在是跨轮累积的，每轮各占一行才读得通。
+    resetSearchSummary();
     ddgFailStreak = 0; // 每轮搜索重新试探 DDG（上一轮熔断不带入本轮）
     braveFailStreak = 0; // 同上：Brave 熔断与串行队列每轮重置
     braveQueue = Promise.resolve();
