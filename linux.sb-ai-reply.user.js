@@ -1853,6 +1853,9 @@
     // 3) Next.js / 通用 __INITIAL_STATE__
     const m3 = html.match(/<script[^>]*>window\.__INITIAL_STATE__\s*=\s*([\s\S]*?)<\/script>/);
     if (m3) { try { walk(JSON.parse(m3[1].replace(/;?\s*$/, ''))); } catch (e) { /* 继续 */ } }
+    // 4) Next.js 标准数据块 __NEXT_DATA__（36Kr/华尔街见闻等 SPA 站正文所在）
+    const m4 = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (m4) { try { walk(JSON.parse(m4[1])); } catch (e) { /* 继续 */ } }
     if (!best) return '';
     return best.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
@@ -2075,6 +2078,11 @@
             if (ssr.length >= 80) { resolve(ssr.slice(0, 4000)); return; }
             // 提取失败（未登录/结构变化）→ 退回通用 HTML 容器（仍失败则上层降级摘要）
           }
+          // 通用站的 SSR 兜底：SPA（Next.js/Nuxt 等）正文在内嵌 JSON 里，容器提取不到时再试一次
+          const ssrFallback = () => {
+            const ssr = stripAiInjection(extractSsrLongest(rawHtml));
+            return ssr.length >= 80 ? ssr.slice(0, 4000) : '';
+          };
           let doc;
           try { doc = new DOMParser().parseFromString(rawHtml, 'text/html'); }
           catch (e) { reject(new Error('HTML 解析失败')); return; }
@@ -2086,7 +2094,7 @@
             const el = doc.querySelector(sel);
             if (el && (el.textContent || '').trim().length > 60) { node = el; break; }
           }
-          if (!node) { reject(new Error('无可读正文')); return; }
+          if (!node) { const s = ssrFallback(); if (s) { resolve(s); return; } reject(new Error('无可读正文')); return; }
           const clone = node.cloneNode(true);
           // 剥无关块：导航/页脚/侧栏/广告/评论区等
           clone.querySelectorAll('script,style,noscript,nav,footer,header,aside,form,iframe,svg,.ad,.ads,.advertisement,.advert,.cookie,.cookie-banner,.banner,#footer,#header,.nav,.menu,.menus,.sidebar,.comment,.comments,.social-share,.related,.recommend,.recommended').forEach((el) => el.remove());
@@ -2098,7 +2106,11 @@
           }
           // 剥离网页里植入的「给 AI 的指令」（prompt injection），避免污染素材/诱导生成模型拒绝
           text = stripAiInjection(text);
-          if (text.length < 80) { reject(new Error('正文过短或为无关声明（可能需登录或 JS 渲染）')); return; }
+          if (text.length < 80) {
+            const s = ssrFallback(); // 容器提取过短（SPA 骨架）→ 试 SSR 内嵌 JSON
+            if (s) { resolve(s); return; }
+            reject(new Error('正文过短或为无关声明（可能需登录或 JS 渲染）')); return;
+          }
           resolve(text.slice(0, 4000));
         },
         onerror: () => reject(new Error('网络错误')),
