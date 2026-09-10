@@ -1811,8 +1811,9 @@
   }
   // 强反爬站深抓黑名单：脚本直连基本拿不到正文（需登录/JS渲染/反爬WAF），
   // 直接判 skip 不发请求、不报错；摘要仍可用于回帖素材。
-  // 注：知乎不在黑名单——登录态 cookie + js-initialData 专用提取可拿到正文（见 extractZhihuText）。
-  const DEEP_FETCH_BLOCKED = ['news.google.com', 'xiaohongshu.com', 'mp.weixin.qq.com', 'weibo.cn', 'weibo.com', 'douyin.com'];
+  // 注：知乎不在黑名单——登录态 cookie + js-initialData 专用提取可拿到正文（见 extractSsrLongest）。
+  //     news.google.com 也不在——中转链接会 302/内嵌原站地址，由 fetchPageTextAt 解析后二次抓取。
+  const DEEP_FETCH_BLOCKED = ['xiaohongshu.com', 'mp.weixin.qq.com', 'weibo.cn', 'weibo.com', 'douyin.com'];
   const isDeepBlocked = (u) => {
     try {
       const h = new URL(u, location.href).hostname.toLowerCase();
@@ -1856,10 +1857,32 @@
     return best.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
-  // 深抓目标网页正文：再 GET 一次搜索结果 URL，按优先级容器提取可读段落文本。
+  // Google News 中转壳（news.google.com/rss/articles/…）解析原站真实链接：
+  // 中转页可能是 meta refresh / JS location / 内嵌 <a> 链接，按优先级提取首个非 Google 域地址
+  function extractGNewsTarget(html) {
+    const isGoogleHost = (h) => /(^|\.)(google\.[a-z.]+|gstatic\.com|googleusercontent\.com|googlesyndication\.com)$/i.test(h);
+    const pick = (raw) => {
+      const s = String(raw || '').trim();
+      if (!/^https?:\/\//i.test(s)) return '';
+      if (/\.(?:js|css|png|jpe?g|gif|svg|webp|ico|woff2?)(?:$|\?)/i.test(s)) return ''; // 跳过静态资源
+      try { return isGoogleHost(new URL(s).hostname) ? '' : s; } catch (e) { return ''; }
+    };
+    let m = html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["'][^"']*url=([^"'>\s]+)/i);
+    if (m) { const u = pick(m[1]); if (u) return u; }
+    m = html.match(/location\.(?:replace|assign|href)\s*[=(]\s*["']([^"']+)["']/i);
+    if (m) { const u = pick(m[1]); if (u) return u; }
+    const links = html.match(/https?:\/\/[^"'\s<>\\]+/g) || [];
+    for (const l of links) { const u = pick(l); if (u) return u; }
+    return '';
+  }
+
+  // 深抓目标网页正文：GET 搜索结果 URL 后按优先级容器提取可读段落文本。
   // 失败 reject（上层降级：该条仍保留搜索引擎摘要，不拖累整组）。
-  function fetchPageText(url, timeoutSec) {
-    const t = timeoutSec || 12;
+  // 支持重定向落地（GM 自动跟随 302，按 finalUrl 的站点规则处理）与
+  // Google News 中转壳解析（提取原站链接后递归抓一次，depth 限 2 防环）。
+  function fetchPageText(url, timeoutSec) { return fetchPageTextAt(url, timeoutSec || 12, 0); }
+
+  function fetchPageTextAt(url, t, depth) {
     let host = '';
     try { host = new URL(url).hostname; } catch (e) { /* 保持空 */ }
     const isZhihu = /(^|\.)zhihu\.com$/i.test(host) || /(^|\.)zhuanlan\.zhihu\.com$/i.test(host);
@@ -1876,6 +1899,20 @@
         onload: (resp) => {
           if (!(resp.status >= 200 && resp.status < 300)) { reject(new Error('HTTP ' + resp.status)); return; }
           const rawHtml = resp.responseText || '';
+          // 实际落地 URL：GM 自动跟随重定向，若落到别的站（如 Google News → 原站）按落地站规则处理
+          let effHost = host;
+          try { if (resp.finalUrl) effHost = new URL(resp.finalUrl).hostname; } catch (e) { /* 用原 host */ }
+          // Google News 中转壳：解析原站链接后递归抓一次
+          if (/(^|\.)news\.google\.com$/i.test(effHost)) {
+            if (depth < 2) {
+              const real = extractGNewsTarget(rawHtml);
+              if (real) { fetchPageTextAt(real, t, depth + 1).then(resolve, reject); return; }
+            }
+            reject(new Error('Google News 中转页未解析出原站链接，保留摘要'));
+            return;
+          }
+          const effZhihu = /(^|\.)zhihu\.com$/i.test(effHost);
+          const effToutiao = /(^|\.)toutiao\.com$/i.test(effHost);
           // WAF 反爬壳识别：雪球 _waf_*、网宿 acw_sc__v2 等返回的是混淆 JS（写 cookie 挑战），
           // 不是正文——直接判失败降级摘要，避免把加密串当正文（假成功更误导）
           if (/["']?(_waf_[a-zA-Z0-9]{4,}|acw_sc__v2|_AspNetCore\.Antiforgery)["']?\s*[:=]/.test(rawHtml) && !/<html[\s>]/i.test(rawHtml.slice(0, 2000))) {
@@ -1883,7 +1920,7 @@
             return;
           }
           // SSR 内嵌 JSON 提取优先（知乎/头条/Next.js 等 JS 渲染站）
-          if (isZhihu || isToutiao) {
+          if (effZhihu || effToutiao) {
             const ssr = extractSsrLongest(rawHtml);
             if (ssr.length >= 80) { resolve(ssr.slice(0, 4000)); return; }
             // 提取失败（未登录/结构变化）→ 退回通用 HTML 容器（仍失败则上层降级摘要）
