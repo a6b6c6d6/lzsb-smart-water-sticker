@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.6
+// @version      2.11.7
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -116,6 +116,7 @@
     searchDeepK: 2, // 深抓正文：对前 N 条结果再抓一次目标网页正文（0=关闭，仅用搜索引擎摘要；1-3 控制条数）
     searchBatch: 3, // 联网搜索并行批大小（每批同时发几个搜索子请求）
     searchTimeout: 12, // 单条搜索请求超时（秒）。搜索是快请求，与 LLM 的 requestTimeout 分开：源挂死时快速失败降级，不拖慢整批
+    pauseOnPickFail: false, // 关闭（默认）：挑选失败自动回退「每词前 K 条」；开启：保留浅搜结果并暂停，等你点「抓取并生成回复」从存档点续跑（不重跑搜索）
     requestTimeout: 180, // 单次请求超时（秒）
     maxRetry: 2 // 可重试失败的最大重试次数（网络/超时/503 等）
   };
@@ -279,6 +280,7 @@
     .lsb-ai-status.lsb-ok { color: #059669; }
     .lsb-ai-status.lsb-error { color: #dc2626; }
     .lsb-ai-status.lsb-loading { color: #2563eb; }
+    .lsb-ai-status.lsb-warn { color: #d97706; } /* 暂停等用户决定（非错误） */
 
     /* 生成过程「视奸」窗：累积显示各阶段进度 + 搜索关键词，可折叠 */
     .lsb-ai-log-wrap { border: 1px solid #dbeafe; border-radius: 8px; overflow: hidden; background: #f8fafc; }
@@ -1791,6 +1793,41 @@
   let braveFailStreak = 0;
   let braveQueue = Promise.resolve();
 
+  // 「挑选失败暂停」的检查点（只放内存，刷新页面即失效）。
+  // 开启 pauseOnPickFail 后，AI 挑选失败时不再自动回退「每词前 K 条」，而是把浅搜结果存下来暂停；
+  // 用户再点「抓取并生成回复」时从这里续跑——跳过规划与分批搜索（最贵的一段：1 次规划 + 十几次搜索请求），
+  // 只重试挑选。动机：中转站上游饱和时挑选会 4xx/超时，重试几乎必然再失败，不如让用户等一会儿手动重试。
+  let pendingResume = null;
+
+  // 检查点签名：只有「同一篇帖子 + 同一模式 + 同一组搜索/模型配置」才认。
+  // 用 systemPrompt 区分水评论/水投票（投票模式会把 systemPrompt 换成 VOTE_SYSTEM_PROMPT）；
+  // 用 rawText 的头尾片段区分换帖。不一致就丢弃，避免把上一次的搜索结果错配到这一次。
+  function resumeSignature(cfg, rawText) {
+    const t = String(rawText || '');
+    return JSON.stringify([
+      t.length, t.slice(0, 300), t.slice(-100),
+      cfg.enableSearch ? 1 : 0, cfg.searchEngine, cfg.searchTopK, cfg.searchDeepK,
+      cfg.searchBatch, cfg.searchTimeout, String(cfg.systemPrompt || '')
+    ]);
+  }
+  // 取用检查点：一致 → 返回存档并清空（一次性，避免被重复续跑）；不一致 → 丢弃并返回 null
+  function takePendingResume(cfg, rawText) {
+    if (!pendingResume) return null;
+    const saved = pendingResume;
+    pendingResume = null;
+    if (saved.sig !== resumeSignature(cfg, rawText)) {
+      appendLog('  ↩ 上次的搜索存档与本次不匹配（换了帖子或改了联网设置），已丢弃，重新搜索', 'warn');
+      return null;
+    }
+    return saved;
+  }
+  // 暂停信号：带 paused 标记的错误，交给各调用方在 catch 里识别（不当成失败）
+  function pausedError(msg) {
+    const e = new Error(msg);
+    e.paused = true;
+    return e;
+  }
+
   // multi 引擎的子源定义（实测可达：hn.algolia / api.stackexchange / api.github / news.google RSS）
   const MULTI_SOURCES = [
     {
@@ -3067,17 +3104,34 @@
       return sendRequest(req, (n, max, e, wait) => progress('生成请求失败，' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn'));
     };
 
+    // 续跑检查：上一轮「挑选失败且开着暂停开关」时会留下存档。命中则跳过规划与分批搜索，
+    // 直接用存档的浅搜结果继续（浅搜是整条链最贵的一段，不能因为挑选失败就白扔）。
+    // takePendingResume 会校验帖子/模式/配置一致，并一次性消费掉存档。
+    const resume = takePendingResume(cfg, rawText);
+    if (resume) {
+      progress('⏩ 从存档点续跑：跳过规划与搜索，直接重试 AI 挑选…');
+      ddgFailStreak = 0;
+      braveFailStreak = 0;
+      braveQueue = Promise.resolve();
+    }
+
     // 阶段1：规划关键词（不带搜索工具，输出 {kw, fallback} 关键词对）
-    progress('正在分析帖子、提炼搜索关键词…');
-    const planReq = buildRequest(cfg, {
-      system: '你是一个搜索规划助手。你的任务是分析论坛内容，提炼用于联网搜索的关键词。',
-      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 数组，每个元素是一个对象，包含两个字段：「kw」是精准搜索词；「fallback」是更泛化的搜索词（用品牌、品类、价格等通用表述，去掉可能不准确或罕见的专有名词）。请把最重要、最值得优先了解的条目排在数组前面。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接，请把链接指向的项目名/产品名/页面主题也纳入搜索词。\n\n【重要：本次搜索目标是补充帖子以外的外部独立信息】论坛内容本身来自本论坛，帖内的观点、体验、讨论、链接多数只存在于本帖——不要为这类"仅帖内可知"的信息生成搜索词（搜不到也搜回原帖没意义）。只为能从第三方独立来源查证的内容（官方资料、新闻报道、百科、教程等）生成搜索词。\n\n论坛内容：\n' + rawText,
-      images: undefined,
-      tools: undefined
-    });
-    const planRes = await stopRace(sendRequest(planReq, (n, max, e, wait) => progress('规划请求失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn')));
-    checkStop();
-    const pairs = parsePairs(planRes.text);
+    // 续跑时跳过规划、直接复用存档的关键词对——关键词一变，存档里候选的 key（S词序-条序）就对不上了
+    let pairs;
+    if (resume) {
+      pairs = resume.pairs;
+    } else {
+      progress('正在分析帖子、提炼搜索关键词…');
+      const planReq = buildRequest(cfg, {
+        system: '你是一个搜索规划助手。你的任务是分析论坛内容，提炼用于联网搜索的关键词。',
+        userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 数组，每个元素是一个对象，包含两个字段：「kw」是精准搜索词；「fallback」是更泛化的搜索词（用品牌、品类、价格等通用表述，去掉可能不准确或罕见的专有名词）。请把最重要、最值得优先了解的条目排在数组前面。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接，请把链接指向的项目名/产品名/页面主题也纳入搜索词。\n\n【重要：本次搜索目标是补充帖子以外的外部独立信息】论坛内容本身来自本论坛，帖内的观点、体验、讨论、链接多数只存在于本帖——不要为这类"仅帖内可知"的信息生成搜索词（搜不到也搜回原帖没意义）。只为能从第三方独立来源查证的内容（官方资料、新闻报道、百科、教程等）生成搜索词。\n\n论坛内容：\n' + rawText,
+        images: undefined,
+        tools: undefined
+      });
+      const planRes = await stopRace(sendRequest(planReq, (n, max, e, wait) => progress('规划请求失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn')));
+      checkStop();
+      pairs = parsePairs(planRes.text);
+    }
 
     if (!pairs.length) {
       // 无需搜索 → 降级普通生成（不带搜索工具）
@@ -3117,6 +3171,7 @@
     let sumFail = 0;
     const allBatchTips = []; // 全部批次的词结果段，累积进汇总行 tip
     for (let i = 0; i < searchItems.length; i += BATCH) {
+      if (resume) break; // 续跑：存档里已有浅搜结果，一个搜索请求都不再发
       const batch = searchItems.slice(i, i + BATCH);
       // 批进度不进日志（避免逐批刷行），只放状态栏；结果统一累积到下方一条「搜索汇总」行
       setStatus('联网搜索中：第 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.map(b => b.query).join(' | ') + '）…', 'loading');
@@ -3168,6 +3223,19 @@
       const msg = '📦 搜索' + (doneAll ? '完成' : '中') + '：' + sumOk + ' 词成功' + (sumFail ? (' · ' + sumFail + ' 词失败') : '') + (doneAll ? '' : ('（' + doneCnt + '/' + searchItems.length + '）')) + '（点开看全部结果）';
       updateSearchSummary(msg, allBatchTips.join('\n\n'), sumFail === 0 ? 'done' : 'warn');
     }
+    if (resume) {
+      // 续跑：把存档的浅搜结果灌回 rows / candRows（rows 供回填组装，candRows 供挑选与深抓）。
+      // key（S词序-条序）与存档时一致——因为关键词对也是复用的，顺序完全相同。
+      resume.rows.forEach((r) => rows.push(r));
+      resume.candRows.forEach((c) => candRows.push(c));
+      allBatchTips.push.apply(allBatchTips, resume.tips);
+      updateSearchSummary(
+        '📦 搜索复用上次结果（从存档点续跑）：' + resume.sumOk + ' 词成功' + (resume.sumFail ? (' · ' + resume.sumFail + ' 词失败') : ''),
+        allBatchTips.join('\n\n'),
+        resume.sumFail === 0 ? 'done' : 'warn'
+      );
+      appendLog('  ⏩ 已复用上次的 ' + rows.length + ' 个搜索结果、' + candRows.length + ' 条候选（未重新搜索）', 'done');
+    }
 
     // 全局深抓：收齐全部词的候选后，一次 AI 调用跨词挑选值得看正文的条目 → 逐条深抓 → 按 key 回填。
     // searchDeepK=0 关闭深抓（纯摘要）；api 源走中转站内置 web_search，拿不到结构化条目，不参与深抓。
@@ -3179,11 +3247,27 @@
       const picked = await stopRace(pickGlobal(cfg, candRows, searchItems.length));
       checkStop();
       let targets;
+      if (!picked && cfg.pauseOnPickFail && !resume) {
+        // 开着「挑选失败暂停」且本轮是首次尝试 → 存下浅搜结果后暂停：不深抓、不生成。
+        // 这里刻意不自己重试第二次：重试权交给用户（他可能等中转站缓过来再点）。
+        // 而 resume（用户点过按钮的续跑）走到这里不再暂停——否则挑选持续失败就会永远卡住。
+        pendingResume = {
+          sig: resumeSignature(cfg, rawText),
+          pairs: pairs,
+          rows: rows,
+          candRows: candRows,
+          tips: allBatchTips.slice(),
+          sumOk: sumOk,
+          sumFail: sumFail
+        };
+        deepLog('  ⏸ AI 挑选失败，已保留本轮搜索结果并暂停（未自动回退、未深抓）');
+        throw pausedError('AI 挑选失败（多为中转站上游繁忙或限流）。本轮搜索结果已存档：点「抓取并生成回复」即可从存档点重试挑选，不会重跑搜索。');
+      }
       if (!picked) {
         // 挑选重试穷尽仍失败 → 回退每词前 K 条（保持「searchDeepK = 每词兜底深抓条数」的语义）
         targets = [];
         rows.forEach((row) => { targets = targets.concat(row.keys.slice(0, deepFallbackK)); });
-        deepLog('  🧠 挑选失败（含重试），回退每词前 ' + deepFallbackK + ' 条');
+        deepLog('  🧠 挑选失败（含重试），回退每词前 ' + deepFallbackK + ' 条' + (resume ? '（续跑后仍失败，按兜底继续）' : ''));
       } else if (!picked.length) {
         targets = [];
         deepLog('  🧠 AI 判定无需深抓');
@@ -3711,7 +3795,8 @@
       searchEngine: ($('searchEngine') && $('searchEngine').value) || 'bing',
       searchSearxInstance: ($('searchSearxInstance') ? String($('searchSearxInstance').value || '') : '').trim(),
       searchTopK: Math.max(1, num('searchTopK', DEFAULTS.searchTopK)),
-      searchDeepK: Math.max(0, Math.min(3, num('searchDeepK', DEFAULTS.searchDeepK)))
+      searchDeepK: Math.max(0, Math.min(3, num('searchDeepK', DEFAULTS.searchDeepK))),
+      pauseOnPickFail: !!(document.getElementById('lsb-ai-cfg-pauseOnPickFail') || {}).checked
     };
   }
 
@@ -3735,6 +3820,7 @@
     $('enableSearch').checked = !!cfg.enableSearch;
     if ($('searchEngine')) $('searchEngine').value = cfg.searchEngine;
     if ($('searchSearxInstance')) $('searchSearxInstance').value = cfg.searchSearxInstance || '';
+    if ($('pauseOnPickFail')) $('pauseOnPickFail').checked = !!cfg.pauseOnPickFail;
   }
 
   // ===== 中转站预设 =====
@@ -4219,6 +4305,11 @@
               <label class="lsb-ai-label">深抓正文条数（0 关·抓前 N 条网页正文替代空摘要）</label>
               <input class="lsb-ai-input" id="lsb-ai-cfg-searchDeepK" type="number" min="0" max="3" step="1">
             </div>
+            <div class="lsb-ai-check-row">
+              <input type="checkbox" id="lsb-ai-cfg-pauseOnPickFail">
+              <label for="lsb-ai-cfg-pauseOnPickFail">AI 挑选失败时暂停（保留浅搜结果，点「抓取并生成回复」从存档点续跑，不重跑搜索）</label>
+            </div>
+            <div class="lsb-ai-hint">上面的开关关闭时（默认）：挑选失败自动回退「每词前 N 条」继续；开启时：停在浅搜结束的位置等你决定，适合中转站上游繁忙报错时手动重试。</div>
             <div class="lsb-ai-row">
               <span class="lsb-ai-hint">系统提示词已移到上方「语气 / 提示词」——点那里的「✎ 编辑」可增删改各套提示词。</span>
             </div>
@@ -4627,6 +4718,10 @@
       if (e && e.aborted) {
         appendLog('⏹ 已停止生成（未完成内容不会填入）', 'warn');
         setStatus('已停止生成', 'info');
+      } else if (e && e.paused) {
+        // 「挑选失败暂停」：搜索结果已存档，等用户再点「抓取并生成回复」从存档点续跑（不重跑搜索）
+        appendLog('⏸ ' + (e.message || '挑选失败，已暂停'), 'warn');
+        setStatus('挑选失败已暂停 · 点「抓取并生成回复」重试挑选（不重跑搜索）', 'warn');
       } else {
         appendLog('❌ ' + (e.message || '生成失败'), 'warn');
         setStatus(e.message || '生成失败', 'error');
@@ -4700,6 +4795,10 @@
       if (e && e.aborted) {
         appendLog('⏹ 已停止生成（未完成内容不会填入）', 'warn');
         setStatus('已停止生成', 'info');
+      } else if (e && e.paused) {
+        // 「挑选失败暂停」：搜索结果已存档，等用户再点「抓取并生成回复」从存档点续跑（不重跑搜索）
+        appendLog('⏸ ' + (e.message || '挑选失败，已暂停'), 'warn');
+        setStatus('挑选失败已暂停 · 点「抓取并生成回复」重试挑选（不重跑搜索）', 'warn');
       } else {
         appendLog('❌ ' + (e.message || '生成失败'), 'warn');
         setStatus(e.message || '生成失败', 'error');
@@ -4864,6 +4963,10 @@
       if (e && e.aborted) {
         appendLog('⏹ 已停止生成（未完成内容不会填入）', 'warn');
         setStatus('已停止生成', 'info');
+      } else if (e && e.paused) {
+        // 「挑选失败暂停」：搜索结果已存档，等用户再点「抓取并生成回复」从存档点续跑（不重跑搜索）
+        appendLog('⏸ ' + (e.message || '挑选失败，已暂停'), 'warn');
+        setStatus('挑选失败已暂停 · 点「抓取并生成回复」重试挑选（不重跑搜索）', 'warn');
       } else {
         appendLog('❌ ' + (e.message || '生成失败'), 'warn');
         setStatus(e.message || '生成失败', 'error');
