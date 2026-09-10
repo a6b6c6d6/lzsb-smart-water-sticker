@@ -676,7 +676,7 @@
     if (!(cfg.searchTopK >= 1)) cfg.searchTopK = DEFAULTS.searchTopK;
     cfg.searchDeepK = Number(cfg.searchDeepK);
     if (!(cfg.searchDeepK >= 0 && cfg.searchDeepK <= 3)) cfg.searchDeepK = DEFAULTS.searchDeepK;
-    if (!['bing', 'ddg', 'smart', 'multi', 'searx', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
+    if (!['bing', 'brave', 'ddg', 'smart', 'multi', 'searx', 'api'].includes(cfg.searchEngine)) cfg.searchEngine = 'bing';
     cfg.searchSearxInstance = String(cfg.searchSearxInstance || '').trim();
     if (!(cfg.requestTimeout >= 5)) cfg.requestTimeout = DEFAULTS.requestTimeout;
     if (!(cfg.maxRetry >= 0)) cfg.maxRetry = DEFAULTS.maxRetry;
@@ -1628,6 +1628,31 @@
         return out.slice(0, k);
       }
     },
+    // Brave Search：独立索引，实测质量明显高于 Bing 网页版（同一条中文新闻查询，Bing 回的是
+    // 「Gemini 中文版使用指南」这类 SEO 引流站，Brave 回的是官方 blog / OpenRouter 价格页 /
+    // 官方 pricing 文档 / 知乎原文）。直链无跳转壳，解析简单。**国内直连被墙，必须走代理**。
+    brave: {
+      buildUrl: (q) => 'https://search.brave.com/search?q=' + encodeURIComponent(q),
+      parse: (doc, k) => {
+        const out = [];
+        const blocks = doc.querySelectorAll('div.snippet[data-type="web"]');
+        const list = blocks.length ? blocks : doc.querySelectorAll('div.snippet');
+        list.forEach((box) => {
+          const a = box.querySelector('a[href^="http"]');
+          if (!a) return;
+          const url = a.getAttribute('href') || '';
+          if (!/^https?:/i.test(url) || /imgs\.search\.brave\.com/i.test(url)) return;
+          const tEl = box.querySelector('.search-snippet-title') || box.querySelector('div.title');
+          const title = tEl ? (tEl.textContent || '').trim() : '';
+          const dEl = box.querySelector('.generic-snippet .content') || box.querySelector('.snippet-description');
+          let snippet = dEl ? (dEl.textContent || '').trim() : '';
+          snippet = snippet.replace(/^\s*\d+\s*(?:hour|day|week|month|year)s?\s*ago\s*[-–]\s*/i, '').replace(/\s+/g, ' ').trim();
+          if (!url || (!title && !snippet)) return;
+          out.push({ title: title, url: url, snippet: snippet });
+        });
+        return out.slice(0, k);
+      }
+    },
     // SearXNG：多引擎聚合、JSON 结构化结果（无品牌霸屏、摘要完整）。公共实例生态不稳（常禁 JSON/下线），
     // 内置池自动轮换 + 设置里可自填实例地址优先使用；全失败报错含各实例具体原因便于换源。
     searx: {
@@ -1643,11 +1668,11 @@
       label: '官方 API 多源聚合（技术向·免Key·零反爬）'
     },
     // smart：按查询语言自动路由（推荐默认）——
-    // 中文词：Bing ‖ Google News 并行竞速（先成功者胜）→ DDG 末位熔断；
-    // 英文词：SO+GitHub+HN 并行 → Bing → DDG
+    // 中文词：Bing News + Brave + Bing 网页 三路并行竞速（按质量优先级合并）→ Google News → DDG 末位熔断；
+    // 英文词：SO+GitHub+HN 并行 → Brave → Bing → DDG
     smart: {
       smart: true,
-      label: '智能路由（中英分流·Bing/News 并行竞速·DDG 末位熔断）'
+      label: '智能路由（中英分流·多源并行·质量优先）'
     }
   };
   // SearXNG 公共实例池（内存轮换序：成功实例被提到队首）
@@ -1713,6 +1738,41 @@
       }
     }
   ];
+
+  // Bing News RSS：免 Key、纯 XML、实测 ~0.67s 且与查询高度相关——同一条「Gemini 3.7 Flash 定价」，
+  // Bing 网页版返回的是 SEO 引流站，Bing News 返回的是真新闻（「再推出半價優惠」「價格僅對手三分之一」）；
+  // 非新闻类查询（如「nginx 配置」）同样返回「Nginx 配置最全详解」这类高质量文章，故可常开。
+  // 链接是 apiclick.aspx?...&url=<编码后的原站地址>，解出原站直链；<News:Source> 带媒体名。
+  const BING_NEWS_SOURCE = {
+    id: 'bingnews', tag: 'BN',
+    build: (q) => 'https://www.bing.com/news/search?q=' + encodeURIComponent(q) + '&format=rss&count=20',
+    extractXml: (xml) => {
+      const s = String(xml || '');
+      const out = [];
+      const unesc = (v) => String(v == null ? '' : v)
+        .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+      const re = /<item>([\s\S]*?)<\/item>/g;
+      let m;
+      while ((m = re.exec(s))) {
+        const seg = m[1];
+        const pick = (tag) => {
+          const mm = new RegExp('<' + tag + '>([\\s\\S]*?)<\\/' + tag + '>').exec(seg);
+          return mm ? mm[1] : '';
+        };
+        const title = unesc(pick('title')).trim();
+        let link = unesc(pick('link')).trim();
+        const um = link.match(/[?&]url=([^&]+)/);
+        if (um) { try { link = decodeURIComponent(um[1]); } catch (e) { /* 解码失败保留原链接 */ } }
+        const src = unesc(pick('News:Source')).trim();
+        const desc = unesc(pick('description')).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!title || !link) continue;
+        out.push({ title: title, url: link, snippet: (src ? '[' + src + '] ' : '') + desc.slice(0, 200) });
+      }
+      return out;
+    }
+  };
 
   // 宽松解析挑选结果：接受 {"pick":[...]} 或裸数组，两者都失败返回 null（调用方据此回退）
   function parsePickList(text) {
@@ -2155,11 +2215,12 @@
     };
     return new Promise((resolve, reject) => {
       // smart 引擎：按查询语言自动路由——
-      // 中文词：DDG(通用网页) → Google News(中文资讯) → Bing 兜底
-      // 英文词：SO+GitHub+HN 并行(技术垂直) → Bing 兜底
-      // 词内串行尝试，命中即停，减少无效请求；DDG 限流/空只当该级失败
+      // 中文词：Bing News + Brave + Bing 网页 三路并行竞速（优先级合并）→ Google News → DDG 末位熔断
+      // 英文词：SO+GitHub+HN 并行(技术垂直) → Brave → Bing → DDG
+      // 词内并行、命中即用；单源失败只当该级失败，不拖垮整词
       if (engine.smart) {
         const bingE = CLIENT_SEARCH_ENGINES.bing;
+        const braveE = CLIENT_SEARCH_ENGINES.brave;
         const ddgE = CLIENT_SEARCH_ENGINES.ddg;
         const newsSrc = MULTI_SOURCES.find((s) => s.id === 'news');
         const jsonSrcs = MULTI_SOURCES.filter((s) => s.kind === 'json'); // 英文源：SO+GitHub+HN（gh 未认证 10/min 限流，403 仅作单源失败，DDG/Bing 兜底接住）
@@ -2204,22 +2265,53 @@
           if (ddgFailStreak >= 2) return Promise.resolve({ ok: false, err: '已熔断(本轮连续' + ddgFailStreak + '次失败)' });
           return fetchItems(ddgE.buildUrl(q), htmlParse(ddgE), 'DDG').then((r) => { if (!r.ok) ddgFailStreak += 1; return r; });
         };
-        // 并行竞速：多源同时发，谁先成功用谁（先到先得）；若在 graceMs 内另一路也成功则合并（多源覆盖更好）。
-        // 用于「互斥可用」的源组合（如直连下 Bing 可用而 Google 被墙、走代理下反之）——避免串行硬等慢源。
-        const raceFirstOk = (producers, graceMs) => new Promise((res) => {
-          let first = null;
+        // 并行竞速（带优先级 + 末位源）：多源同时发，首个成功者触发「宽限期」——宽限内到达的其他源一并合并，
+        // 宽限结束即返回，不等慢源（保证速度，也让「直连时 Brave 超时」之类的慢源不拖后腿）。
+        // 合并规则：
+        //   · 主源（idx < lastResortFrom）之间「轮转取条」（各源轮流贡献），保证高质量源不被单一源的条数挤掉；
+        //   · 末位源（idx >= lastResortFrom，如 Bing 网页版）只负责「触发返回、避免等待」，
+        //     其条目仅在主源全空时才启用——这样直连（Brave/BN 不可用）时能快速兜底，代理时又不引入 SEO 噪音。
+        const raceFirstOk = (producers, graceMs, lastResortFrom) => new Promise((res) => {
+          const got = [];
           let settled = 0;
           let timer = null;
-          const finish = (v) => { if (timer) { clearTimeout(timer); timer = null; } res(v); };
-          producers.forEach((p) => p.then((r) => {
+          const roundRobin = (groups) => {
+            const queues = groups.map((g) => g.items.slice());
+            const seen = Object.create(null);
+            const out = [];
+            let added = true;
+            while (added) {
+              added = false;
+              for (const q of queues) {
+                while (q.length) {
+                  const it = q.shift();
+                  const key = it.url || it.title;
+                  if (!key || seen[key]) continue;
+                  seen[key] = true;
+                  out.push(it);
+                  added = true;
+                  break;
+                }
+              }
+            }
+            return out;
+          };
+          const finish = () => {
+            if (timer) { clearTimeout(timer); timer = null; }
+            if (!got.length) { res(null); return; }
+            const ranked = got.slice().sort((a, b) => a.idx - b.idx);
+            const cut = (lastResortFrom == null) ? ranked.length : lastResortFrom;
+            let out = roundRobin(ranked.filter((g) => g.idx < cut));
+            if (!out.length) out = roundRobin(ranked.filter((g) => g.idx >= cut)); // 主源全空才动用末位源
+            res(out.length ? out : null);
+          };
+          producers.forEach((p, idx) => p.then((r) => {
             settled += 1;
-            if (r && r.ok) {
-              const tagged = r.items.map((it) => Object.assign({}, it, { src: r.tag }));
-              if (!first) {
-                first = tagged;
-                if (graceMs > 0) timer = setTimeout(() => finish(first), graceMs); else finish(first);
-              } else finish(first.concat(tagged));
-            } else if (settled === producers.length && !first) finish(null);
+            if (r && r.ok && r.items && r.items.length) {
+              got.push({ idx: idx, items: r.items.map((it) => Object.assign({}, it, { src: r.tag })) });
+              if (!timer) timer = setTimeout(finish, graceMs);
+            }
+            if (settled === producers.length) finish();
           }));
         });
         (async () => {
@@ -2228,17 +2320,24 @@
             let items = null;
             const tagItems = (arr, tag) => arr.map((it) => Object.assign({}, it, { src: tag }));
             if (isCJK) {
-              // 中文链路（实测重排 + 并行竞速）：
-              //   · www.bing.com 直连/走代理都稳定可用（0.7~5.8s，~10 条），作主源；
-              //   · Google News 中文资讯强（原站链接还能走深抓解码），作并行补充/兜底；
-              // 两路并行、先成功者胜（另加 0.8s 宽限合并），任何网络环境下都能在 ~1~7s 出结果。
-              // DDG 原为中文首选，其域名被 DNS 投毒导致长期不可达 → 降为末位兜底 + 会话级熔断。
+              // 中文链路（按实测质量重排）：Bing News(资讯·0.67s) ＋ Brave(独立索引·质量最高) 为主源，
+              // Bing 网页版降为「末位源」——它对中文新闻查询返回大量 SEO 引流站（gemini-cnblog / claudezh 之类），
+              // 只在主源全空（典型=国内直连、Brave 被墙）时才启用。
+              // 主源轮转合并 + 截 topK，宽限 1.2s：代理下 ~0.7s 出结果，直连下 Brave 超时也不拖累（Bing 一到就返回）。
               const picked = await raceFirstOk([
-                fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing').then((r) => { if (!r.ok) errLog.push('Bing:' + (r.err || '失败')); return r; }),
-                fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN').then((r) => { if (!r.ok) errLog.push('GN:' + (r.err || '失败')); return r; })
-              ], 800);
+                fetchItems(BING_NEWS_SOURCE.build(query), (txt) => BING_NEWS_SOURCE.extractXml(txt), 'BN').then((r) => { if (!r.ok) errLog.push('BN:' + (r.err || '失败')); return r; }),
+                fetchItems(braveE.buildUrl(query), htmlParse(braveE), 'Brave').then((r) => { if (!r.ok) errLog.push('Brave:' + (r.err || '失败')); return r; }),
+                fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing').then((r) => { if (!r.ok) errLog.push('Bing:' + (r.err || '失败')); return r; })
+              ], 1200, 2);
               checkStop();
               if (picked && picked.length) items = mergeItems([picked]);
+              // 三路皆空 → Google News（中文资讯强，原站链接可走深抓解码）→ 再不行才末位 DDG（带熔断）
+              if (!items || !items.length) {
+                const gnR = await fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN');
+                checkStop();
+                if (gnR.ok) items = tagItems(gnR.items, 'GN');
+                else errLog.push('GN:' + (gnR.err || '失败'));
+              }
               if (!items || !items.length) {
                 const ddgR = await tryDdg(query);
                 if (ddgR && ddgR.ok) items = tagItems(ddgR.items, 'DDG');
@@ -2251,11 +2350,17 @@
               if (ok.length) items = mergeItems(ok.map((o) => tagItems(o.items, o.tag)));
               else {
                 outs.forEach((o) => errLog.push(o.tag + ':' + (o.err || '失败')));
-                // 英文垂直源空 → Bing 兜底（通用网页/英文索引更全），再不行才末位 DDG
-                const bingR2 = await fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing');
+                // 英文垂直源空 → Brave（独立索引·通用覆盖好）→ Bing → 末位 DDG
+                const braveR = await fetchItems(braveE.buildUrl(query), htmlParse(braveE), 'Brave');
                 checkStop();
-                if (bingR2.ok) items = tagItems(bingR2.items, 'Bing');
-                else errLog.push('Bing:' + (bingR2.err || '失败'));
+                if (braveR.ok) items = tagItems(braveR.items, 'Brave');
+                else errLog.push('Brave:' + (braveR.err || '失败'));
+                if (!items || !items.length) {
+                  const bingR2 = await fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing');
+                  checkStop();
+                  if (bingR2.ok) items = tagItems(bingR2.items, 'Bing');
+                  else errLog.push('Bing:' + (bingR2.err || '失败'));
+                }
                 if (!items || !items.length) {
                   const ddgR2 = await tryDdg(query);
                   if (ddgR2 && ddgR2.ok) items = tagItems(ddgR2.items, 'DDG');
@@ -3915,7 +4020,8 @@
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">联网搜索源</label>
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
-                <option value="smart">智能路由（推荐·中英分流·Bing/News 并行竞速·DDG 末位熔断）</option>
+                <option value="smart">智能路由（推荐·中英分流·Bing News/Brave/Bing 多源并行·质量优先）</option>
+                <option value="brave">Brave Search（质量最高·独立索引·国内需代理）</option>
                 <option value="bing">Bing 直连（通用兜底·结果偏杂）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
               </select>
