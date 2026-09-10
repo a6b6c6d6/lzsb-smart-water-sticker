@@ -1871,8 +1871,10 @@
     if (m) { const u = pick(m[1]); if (u) return u; }
     m = html.match(/location\.(?:replace|assign|href)\s*[=(]\s*["']([^"']+)["']/i);
     if (m) { const u = pick(m[1]); if (u) return u; }
-    const links = html.match(/https?:\/\/[^"'\s<>\\]+/g) || [];
-    for (const l of links) { const u = pick(l); if (u) return u; }
+    // 兜底：只从属性值里找（href / data-n-au）——裸 URL 扫描会命中页内资源/JSON 串，噪声太大
+    const re = /(?:href|data-n-au)\s*=\s*["'](https?:\/\/[^"']+)["']/gi;
+    let mm;
+    while ((mm = re.exec(html)) !== null) { const u = pick(mm[1]); if (u) return u; }
     return '';
   }
 
@@ -1893,6 +1895,35 @@
       return !(aiWord && cmdWord);
     });
     return keep.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  // Google News 中转链接「换源定位」：中转页在无 JS 环境下抓不到正文，
+  // 改用条目标题在 DDG 搜一次，取首个非 Google News 的结果 URL 作为真实抓取目标。
+  // resolve 原站 URL；定位不到 resolve ''（调用方退回原 URL 或降级摘要）。
+  async function locateNewsSource(cfg, title) {
+    const t = String(title || '').replace(/\s*[-–—|]\s*[^-–—|]{1,24}$/, '').trim(); // 去掉尾部「 - 来源名」
+    if (!t) return '';
+    const eng = CLIENT_SEARCH_ENGINES.ddg;
+    const timeoutSec = Math.min((Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 30), 20);
+    const items = await new Promise((resolve) => {
+      gmRequest({
+        method: 'GET',
+        url: eng.buildUrl(t),
+        timeout: timeoutSec * 1000,
+        headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+        onload: (resp) => {
+          if (!(resp.status >= 200 && resp.status < 300)) { resolve([]); return; }
+          try { const doc = new DOMParser().parseFromString(resp.responseText || '', 'text/html'); resolve(eng.parse(doc, 5)); }
+          catch (e) { resolve([]); }
+        },
+        onerror: () => resolve([]),
+        ontimeout: () => resolve([]),
+        onabort: () => resolve([])
+      });
+    });
+    const hostOf = (u) => { try { return new URL(u).hostname; } catch (e) { return ''; } };
+    const hit = items.find((it) => it.url && !/(^|\.)news\.google\.com$/i.test(hostOf(it.url)) && !isDeepBlocked(it.url));
+    return hit ? hit.url : '';
   }
 
   // 深抓目标网页正文：GET 搜索结果 URL 后按优先级容器提取可读段落文本。
@@ -2748,7 +2779,16 @@
         if (isSameSite(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true }); continue; }
         if (isDeepBlocked(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true, info: '强反爬站，保留摘要' }); continue; }
         try {
-          const txt = await stopRace(fetchPageText(c.url, 12));
+          // Google News 中转链接：无 JS 环境抓不到，先用标题换源定位原站（DDG 搜一次）
+          let targetUrl = c.url;
+          let host0 = '';
+          try { host0 = new URL(c.url).hostname; } catch (e) { /* 保持空 */ }
+          if (/(^|\.)news\.google\.com$/i.test(host0)) {
+            const located = await stopRace(locateNewsSource(cfg, c.title));
+            checkStop();
+            if (located) targetUrl = located;
+          }
+          const txt = await stopRace(fetchPageText(targetUrl, 12));
           checkStop();
           deepMap[key] = txt;
           steps.push({ key: key, title: c.title, url: c.url, ok: true, text: txt });
