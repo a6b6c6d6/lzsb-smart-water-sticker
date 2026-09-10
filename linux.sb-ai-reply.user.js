@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.1
+// @version      2.11.2
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1638,9 +1638,10 @@
   // 实测（2026-09-10，用户网络）：
   //  · www.bing.com  直连 0.78s / 走代理 0.7~5.8s，两种模式都稳定返回 ~10 条结果 → 首选
   //  · cn.bing.com   直连正常，但走代理（香港节点）会被降级成「必应首页」（0 结果）→ 已弃用
-  //  · DuckDuckGo    html 端点长期不可达：其域名被 GFW DNS 投毒（本地/阿里/腾讯 DNS 均返回
-  //                  Dropbox/Facebook 网段 IP），且 Clash fallback-filter 的域名白名单未含
-  //                  duckduckgo.com → 投毒 IP 未被判定为污染 → 连到错主机 → 超时 → 仅作末位兜底
+  //  · DuckDuckGo    域名被 GFW DNS 投毒（直连必失败）；且 html/lite 端点对 curl 返回 202 验证码页。
+  //                  但 **GM_xmlhttpRequest 走 Firefox 网络栈可正常拿到 200 + 结果**（实测 html 端点
+  //                  32954 字节 / 91 个结果块 / 无验证码，中英文查询均可）——判据是链路/TLS 指纹而非 IP 被封。
+  //                  故 DDG 可用，作为「主源全空」时的通用网页兜底（质量远优于 Bing 的「本地区热门」回退页）。
   // 依赖 GM_xmlhttpRequest 跨域（@connect 现为 * 已覆盖；若收紧权限，需放行 www.bing.com / html.duckduckgo.com）。
   const CLIENT_SEARCH_ENGINES = {
     bing: {
@@ -1661,14 +1662,17 @@
       buildUrl: (q) => 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q),
       parse: (doc, k) => {
         const out = [];
-        doc.querySelectorAll('.result').forEach((box) => {
-          const a = box.querySelector('.result__a');
+        const boxes = doc.querySelectorAll('.result');
+        const list = boxes.length ? boxes : doc.querySelectorAll('.web-result');
+        list.forEach((box) => {
+          const a = box.querySelector('.result__a') || box.querySelector('h2 a') || box.querySelector('a[href]');
           if (!a) return;
           let href = a.getAttribute('href') || a.href || '';
           const m = href.match(/[?&]uddg=([^&]+)/); // DDG 用 /l/?uddg= 包了一层跳转，解出真实地址
           if (m) { try { href = decodeURIComponent(m[1]); } catch (e) { /* 解码失败保持原链接 */ } }
           if (href.indexOf('//') === 0) href = 'https:' + href;
-          const s = box.querySelector('.result__snippet');
+          if (!/^https?:/i.test(href)) return;
+          const s = box.querySelector('.result__snippet') || box.querySelector('.result__body');
           out.push({ title: (a.textContent || '').trim(), url: href, snippet: s ? (s.textContent || '').trim() : '' });
         });
         return out.slice(0, k);
@@ -1714,11 +1718,12 @@
       label: '官方 API 多源聚合（技术向·免Key·零反爬）'
     },
     // smart：按查询语言自动路由（推荐默认）——
-    // 中文词：Google News ＋ Bing News ＋ Brave 三主源并行竞速（轮转合并）→ DDG；Bing 网页版仅作末位兜底；
-    // 英文词：SO+GitHub+HN 并行 → 若空则同上三主源竞速 → DDG
+    // 中文词：Google News ＋ Bing News ＋ Brave 三主源并行竞速（轮转合并）
+    //         → 主源全空则 DuckDuckGo（通用网页兜底）→ 再空才用 Bing 网页版（末位）
+    // 英文词：SO+GitHub+HN 并行 → 若空则同上竞速 → DDG → Bing
     smart: {
       smart: true,
-      label: '智能路由（中英分流·多主源并行·Bing 网页版仅末位兜底）'
+      label: '智能路由（中英分流·三主源并行·DDG 兜底·Bing 末位）'
     }
   };
   // SearXNG 公共实例池（内存轮换序：成功实例被提到队首）
@@ -2290,11 +2295,11 @@
         const timeoutMs = timeoutSec * 1000;
         const errLog = [];
         const isCJK = /[\u3400-\u9fff]/.test(query); // 含中日韩表意字符视为中文词
-        const fetchItems = (url, parser, tag) => new Promise((res) => {
+        const fetchItems = (url, parser, tag, tmoMs) => new Promise((res) => {
           gmRequest({
             method: 'GET',
             url: url,
-            timeout: timeoutMs,
+            timeout: tmoMs || timeoutMs,
             headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
             onload: (resp) => {
               if (!(resp.status >= 200 && resp.status < 300)) { res({ ok: false, err: 'HTTP' + resp.status, tag: tag }); return; }
@@ -2324,11 +2329,15 @@
           }
           return out.slice(0, topK);
         };
-        // DDG 熔断器：html 端点已长期不可达（直连失败 / 走代理卡满超时）。同一轮搜索内连续失败 2 次即熔断，
-        // 后续关键词直接跳过——避免 16 个词各陪它卡一次超时（这才是「搜得慢」的主因）。跨轮重置，DDG 恢复后可自动用回。
+        // DDG 熔断器：DDG 会以两种方式失效——① 域名被 GFW DNS 投毒（直连必失败）；② 端点被反爬拦下
+        // 返回 202 验证码页（注意 202 属 2xx，会被当「成功」再解析出 0 条，只显示「空结果」）。
+        // 同一轮搜索内连续失败 2 次即熔断，后续关键词直接跳过，避免反复浪费请求/拖慢批次；跨轮重置。
         const tryDdg = (q) => {
           if (ddgFailStreak >= 2) return Promise.resolve({ ok: false, err: '已熔断(本轮连续' + ddgFailStreak + '次失败)' });
-          return fetchItems(ddgE.buildUrl(q), htmlParse(ddgE), 'DDG').then((r) => { if (!r.ok) ddgFailStreak += 1; return r; });
+          // 超时封顶 8s：DDG 只有走代理才通，直连时（DNS 投毒）必然卡到超时——给它比通用 searchTimeout
+          // 更短的上限，把「直连模式下白等」的代价压到最小（熔断会在此后跳过它）
+          return fetchItems(ddgE.buildUrl(q), htmlParse(ddgE), 'DDG', Math.min(timeoutMs, 8000))
+            .then((r) => { if (!r.ok) ddgFailStreak += 1; else ddgFailStreak = 0; return r; });
         };
         // Brave 串行 + 熔断：并发会被 429（实测全 429），用队列保证同一时刻只有一个在途请求；
         // 连续失败 2 次即本轮熔断（不再浪费请求、不再拖慢批次），成功一次即清零。跨轮重置。
@@ -2345,10 +2354,11 @@
         };
         // 并行竞速（带优先级 + 末位源）：多源同时发，首个成功者触发「宽限期」——宽限内到达的其他源一并合并，
         // 宽限结束即返回，不等慢源（保证速度，也让「直连时 Brave 超时」之类的慢源不拖后腿）。
-        // 合并规则：
+        // 返回 { primary, reserve } 两段而不是一段合并结果——调用方需要在「主源空」时插入别的兜底源
+        // （如 DuckDuckGo），再用 reserve 收尾；若只返回一段就分不清「主源有结果」还是「已在吃兜底」。
         //   · 主源（idx < lastResortFrom）之间「轮转取条」（各源轮流贡献），保证高质量源不被单一源的条数挤掉；
         //   · 末位源（idx >= lastResortFrom，如 Bing 网页版）只负责「触发返回、避免等待」，
-        //     其条目仅在主源全空时才启用——这样直连（Brave/BN 不可用）时能快速兜底，代理时又不引入 SEO 噪音。
+        //     其条目归入 reserve，仅在主源全空且更优兜底源也不可用时才启用。
         const raceFirstOk = (producers, graceMs, lastResortFrom) => new Promise((res) => {
           const got = [];
           let settled = 0;
@@ -2376,12 +2386,13 @@
           };
           const finish = () => {
             if (timer) { clearTimeout(timer); timer = null; }
-            if (!got.length) { res(null); return; }
+            if (!got.length) { res({ primary: [], reserve: [] }); return; }
             const ranked = got.slice().sort((a, b) => a.idx - b.idx);
             const cut = (lastResortFrom == null) ? ranked.length : lastResortFrom;
-            let out = roundRobin(ranked.filter((g) => g.idx < cut));
-            if (!out.length) out = roundRobin(ranked.filter((g) => g.idx >= cut)); // 主源全空才动用末位源
-            res(out.length ? out : null);
+            res({
+              primary: roundRobin(ranked.filter((g) => g.idx < cut)),
+              reserve: roundRobin(ranked.filter((g) => g.idx >= cut))
+            });
           };
           producers.forEach((p, idx) => p.then((r) => {
             settled += 1;
@@ -2403,23 +2414,28 @@
               //     （实测「nginx 配置」返回 50 条 OSCHINA/InfoQ/36kr）→ 主源第 1 位
               //   · Bing News RSS —— 0.67s / 纯 XML / 真新闻 → 主源第 2 位
               //   · Brave —— 质量最高但要串行（并发必 429）→ 主源第 3 位（带熔断）
-              //   · Bing 网页版 —— SEO 引流站多（gemini-cnblog / claudezh / chatgpt-guides 之类），
-              //     降为「末位源」：只负责触发返回、避免干等，条目仅在主源全空（典型=国内直连）时启用
+              //   · Bing 网页版 —— SEO 引流站多，且找不到匹配时会回退到「本地区热门」页（实测返回过
+              //     日文体育站、大阪天气、韩文 Daum 客服、单字「有」的字典页）→ 降为「末位源」：
+              //     只负责触发返回、避免干等，其条目归入 reserve 备用。
               // 主源之间轮转取条合并 + 截 topK；宽限 2.5s（给 GN/Brave 留出到达时间，兼顾质量与速度）
-              const picked = await raceFirstOk([
+              const out = await raceFirstOk([
                 fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN').then((r) => { if (!r.ok) errLog.push('GN:' + (r.err || '失败')); return r; }),
                 fetchItems(BING_NEWS_SOURCE.build(query), (txt) => BING_NEWS_SOURCE.extractXml(txt), 'BN').then((r) => { if (!r.ok) errLog.push('BN:' + (r.err || '失败')); return r; }),
                 fetchBrave(query).then((r) => { if (!r.ok) errLog.push('Brave:' + (r.err || '失败')); return r; }),
                 fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing').then((r) => { if (!r.ok) errLog.push('Bing:' + (r.err || '失败')); return r; })
               ], 2500, 3);
               checkStop();
-              if (picked && picked.length) items = mergeItems([picked]);
-              // 主源与末位源都空 → 只剩 DDG（带熔断）
+              if (out.primary.length) items = mergeItems([out.primary]);
+              // 主源全空 → 先试 DuckDuckGo（通用网页索引，质量明显优于 Bing 的「本地区热门」兜底）。
+              // 实测：DDG 的 html 端点对 curl 返回 202 验证码，但 GM_xmlhttpRequest 走 Firefox 网络栈
+              // 可正常拿到 200 + 结果（判据是链路/TLS 指纹，不是 IP 被封）——故值得作为主力兜底。
               if (!items || !items.length) {
                 const ddgR = await tryDdg(query);
                 if (ddgR && ddgR.ok) items = tagItems(ddgR.items, 'DDG');
                 else errLog.push('DDG:' + ((ddgR && ddgR.err) || '失败'));
               }
+              // DDG 也不成 → 才用竞速时已取回的 Bing 结果凑（质量差，但好过整词失败）
+              if ((!items || !items.length) && out.reserve.length) items = mergeItems([out.reserve]);
             } else {
               const outs = await Promise.all(jsonSrcs.map((src) => fetchItems(src.build(query), (txt) => src.extract(JSON.parse(txt)), src.id.toUpperCase())));
               checkStop();
@@ -2429,18 +2445,19 @@
                 outs.forEach((o) => errLog.push(o.tag + ':' + (o.err || '失败')));
                 // 英文垂直源（SO/GH/HN）空 —— 典型场景是「非编程类话题」（如 ChatGPT 服务故障），
                 // 垂直源命不中。此时同样走「GN ＋ Brave 主源 + Bing 末位」竞速，避免直接掉进 Bing 的 SEO 结果。
-                const picked2 = await raceFirstOk([
+                const out2 = await raceFirstOk([
                   fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN').then((r) => { if (!r.ok) errLog.push('GN:' + (r.err || '失败')); return r; }),
                   fetchBrave(query).then((r) => { if (!r.ok) errLog.push('Brave:' + (r.err || '失败')); return r; }),
                   fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing').then((r) => { if (!r.ok) errLog.push('Bing:' + (r.err || '失败')); return r; })
                 ], 2500, 2);
                 checkStop();
-                if (picked2 && picked2.length) items = mergeItems([picked2]);
+                if (out2.primary.length) items = mergeItems([out2.primary]);
                 if (!items || !items.length) {
                   const ddgR2 = await tryDdg(query);
                   if (ddgR2 && ddgR2.ok) items = tagItems(ddgR2.items, 'DDG');
                   else errLog.push('DDG:' + ((ddgR2 && ddgR2.err) || '失败'));
                 }
+                if ((!items || !items.length) && out2.reserve.length) items = mergeItems([out2.reserve]);
               }
             }
             if (!items || !items.length) {
@@ -4098,6 +4115,7 @@
               <label class="lsb-ai-label">联网搜索源</label>
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
                 <option value="smart">智能路由（推荐·中英分流·GN/BingNews/Brave 多主源并行）</option>
+                <option value="ddg">DuckDuckGo（通用网页·GM 链路可用·国内需代理）</option>
                 <option value="brave">Brave Search（质量最高·独立索引·国内需代理）</option>
                 <option value="bing">Bing 直连（通用兜底·结果偏杂）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
