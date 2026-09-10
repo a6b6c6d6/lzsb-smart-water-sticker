@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.0
+// @version      2.11.1
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1592,6 +1592,48 @@
     return [{ type: 'web_search' }];
   }
 
+  // Bing 结果链接有两种形态（实测同一查询两次请求会随机切换）：直接给出目标地址，
+  // 或包一层点击统计跳转 https://www.bing.com/ck/a?...&u=<base64url(目标地址), 前置 'a1'>。
+  // 后者必须解出真实地址——否则深抓会去抓 Bing 的跳转页，URL 归一化去重也会失效。
+  function unwrapBingUrl(u) {
+    const raw = String(u || '');
+    if (!/\/ck\/a/i.test(raw)) return raw;
+    const m = /[?&]u=([^&]+)/.exec(raw);
+    if (!m) return raw;
+    let b64 = '';
+    try { b64 = decodeURIComponent(m[1]); } catch (e) { return raw; }
+    if (b64.indexOf('a1') === 0) b64 = b64.slice(2);
+    b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    try {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const s = new TextDecoder('utf-8').decode(bytes);
+      return /^https?:\/\//i.test(s) ? s : raw;
+    } catch (e) { return raw; }
+  }
+
+  // 搜索结果垃圾过滤。Google News 中文源会混进一批「博彩／引流站」内容：这些站把正常游戏新闻
+  // 抓取过来，再套上「XX娱乐网_游戏资讯_」「YY体育网站入口_游戏资讯_」这类博彩品牌标题，靠蹭
+  // 资讯关键词吃流量。实测来源域名 ttplus.cn（体坛）与 womenofchina.com，占中文资讯结果约两成。
+  // 两条判据互补：① 已知垃圾域名黑名单（精准）；② 标题特征（刮取页的 "…资讯…" 下划线结构与博彩品牌词，用于兜住新域名）。
+  // site 参数：条目的真实媒体站地址（Google News 的 <source url>）——GN 条目 url 是中转壳，
+  // 域名黑名单只能靠这个字段生效，否则对 GN 形同虚设。
+  const SPAM_DOMAINS = ['ttplus.cn', 'womenofchina.com'];
+  const SPAM_TITLE_RE = /_[^_]{0,8}(?:游戏|独立游戏)?资讯_|娱乐网|娱乐城|备用网址|新现金网|赌博|博彩|真人官方|真人游戏|体育网站入口|体育app|电玩app|平台登录|登录官网|怎么开户|彩金|老虎机|棋牌|最新网址|注册送/i;
+  function isSpamResult(title, url, site) {
+    if (SPAM_TITLE_RE.test(String(title || ''))) return true;
+    const hosts = [];
+    for (const u of [url, site]) {
+      try {
+        const h = new URL(String(u || '')).hostname.toLowerCase();
+        if (h) hosts.push(h);
+      } catch (e) { /* 非合法 URL，跳过 */ }
+    }
+    return SPAM_DOMAINS.some((d) => hosts.some((h) => h === d || h.endsWith('.' + d)));
+  }
+
   // ===== 客户端直连搜索引擎（方案：不依赖中转站内置 web_search，免 API Key）=====
   // 实测（2026-09-10，用户网络）：
   //  · www.bing.com  直连 0.78s / 走代理 0.7~5.8s，两种模式都稳定返回 ~10 条结果 → 首选
@@ -1609,7 +1651,8 @@
           const a = li.querySelector('h2 a');
           if (!a || !a.href) return;
           const cap = li.querySelector('.b_caption p, p');
-          out.push({ title: (a.textContent || '').trim(), url: a.href, snippet: cap ? (cap.textContent || '').trim() : '' });
+          // a.href 可能是 ck/a 跳转壳（见 unwrapBingUrl），必须解出真实地址
+          out.push({ title: (a.textContent || '').trim(), url: unwrapBingUrl(a.href), snippet: cap ? (cap.textContent || '').trim() : '' });
         });
         return out.slice(0, k);
       }
@@ -1737,9 +1780,19 @@
           const l = it.querySelector('link');
           const d = it.querySelector('description');
           if (!t || !l) return;
+          // <source url="媒体站地址">媒体名</source> —— 条目链接是 news.google.com 中转壳，
+          // 拿不到真实域名，只能靠这个字段判断来源（垃圾域名黑名单依赖它）
+          const sEl = it.querySelector('source');
+          const site = sEl ? (sEl.getAttribute('url') || '') : '';
+          const siteName = sEl ? (sEl.textContent || '').trim() : '';
           let desc = (d ? d.textContent || '' : '');
           desc = desc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-          out.push({ title: t.textContent.trim(), url: l.textContent.trim(), snippet: desc.slice(0, 200) });
+          out.push({
+            title: t.textContent.trim(),
+            url: l.textContent.trim(),
+            snippet: (siteName ? '[' + siteName + '] ' : '') + desc.slice(0, 200),
+            site: site
+          });
         });
         return out;
       }
@@ -2212,7 +2265,10 @@
       ? (customInst ? [customInst].concat(searxOrder.filter((x) => x !== customInst)) : searxOrder.slice())
       : [null];
     const finish = (raw, resolve, reject) => {
-      const items = raw.map((it) => (it.src ? it : Object.assign({}, it, { src: engineName })));
+      // 兜底过滤博彩/引流垃圾（智能路由已在解析处过滤；这里覆盖单引擎 / multi 等其余路径）
+      const items = raw
+        .map((it) => (it.src ? it : Object.assign({}, it, { src: engineName })))
+        .filter((it) => !isSpamResult(it.title, it.url, it.site));
       if (!items.length) { reject(new Error('无结果（可能被搜索引擎反爬拦截，可换搜索源重试）')); return; }
       const text = items.map((it, i) => {
         const sn = (it.snippet || '').length > 300 ? it.snippet.slice(0, 300) + '…' : (it.snippet || '');
@@ -2243,7 +2299,9 @@
             onload: (resp) => {
               if (!(resp.status >= 200 && resp.status < 300)) { res({ ok: false, err: 'HTTP' + resp.status, tag: tag }); return; }
               try {
-                const items = parser(resp.responseText || '') || [];
+                // 解析后立刻剔除博彩/引流垃圾（见 isSpamResult）：必须在截 topK 之前过滤，
+                // 否则垃圾会先占满名额，把真正有用的结果挤掉
+                const items = (parser(resp.responseText || '') || []).filter((it) => !isSpamResult(it.title, it.url, it.site));
                 res(items.length ? { ok: true, items: items, tag: tag } : { ok: false, err: '空结果', tag: tag });
               } catch (e) { res({ ok: false, err: '解析失败', tag: tag }); }
             },
