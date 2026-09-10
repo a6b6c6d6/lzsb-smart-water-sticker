@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.3
+// @version      2.11.4
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1648,13 +1648,11 @@
     return d.getFullYear() === n.getFullYear() ? (mm + '-' + dd) : (d.getFullYear() + '-' + mm + '-' + dd);
   }
 
-  // 给搜索结果统一加「[媒体名 · 日期] 」摘要前缀（如 [第一财经 · 09-09]）。
-  // 放在摘要最前面而非标题里：① 标题的开头位置要留给 [来源徽标] 的解析正则；
-  // ② 最终上下文对摘要截 150 字，前缀在开头不会被截掉；③ 模型和用户在深抓明细里都能一眼看到新旧。
+  // 给搜索结果统一加「[媒体名] 」摘要前缀。日期不塞在这里——它由各渲染处统一以 (MM-DD) 标在标题前
+  // （搜索明细卡片 / 最终上下文 / 深抓明细），那样更显眼，也不会在摘要里再重复一遍占字数。
   function decorateResult(it) {
-    const meta = [it.siteName, it.date].filter(Boolean).join(' · ');
-    if (!meta) return it;
-    return Object.assign({}, it, { snippet: '[' + meta + '] ' + (it.snippet || '') });
+    if (!it.siteName) return it;
+    return Object.assign({}, it, { snippet: '[' + it.siteName + '] ' + (it.snippet || '') });
   }
 
   // ===== 客户端直连搜索引擎（方案：不依赖中转站内置 web_search，免 API Key）=====
@@ -2324,7 +2322,10 @@
       if (!items.length) { reject(new Error('无结果（可能被搜索引擎反爬拦截，可换搜索源重试）')); return; }
       const text = items.map((it, i) => {
         const sn = (it.snippet || '').length > 300 ? it.snippet.slice(0, 300) + '…' : (it.snippet || '');
-        return (i + 1) + '. ' + (it.src ? '[' + it.src + '] ' : '') + it.title + '\n链接：' + it.url + (sn ? '\n摘要：' + sn : '');
+        // 日期以 (MM-DD) 标在徽标与标题之间：搜索明细卡片按「N. 标题」切块并解析开头的 [来源] 徽标，
+        // 放在这里既不影响徽标解析，又能让结果新旧一眼可辨
+        const dt = it.date ? ('(' + it.date + ') ') : '';
+        return (i + 1) + '. ' + (it.src ? '[' + it.src + '] ' : '') + dt + it.title + '\n链接：' + it.url + (sn ? '\n摘要：' + sn : '');
       }).join('\n');
       resolve({ text: text, items: items, searched: true });
     };
@@ -3225,7 +3226,8 @@
     const SNIPPET_FINAL_LIMIT = 150;
     const formatFinalItem = (it, j) => {
       const sn = (it.snippet || '').length > SNIPPET_FINAL_LIMIT ? it.snippet.slice(0, SNIPPET_FINAL_LIMIT) + '…' : (it.snippet || '');
-      return (j + 1) + '. ' + (it.title || '') + '\n链接：' + (it.url || '') + (sn ? '\n摘要：' + sn : '');
+      const dt = it.date ? ('(' + it.date + ') ') : ''; // 日期跟标题走，模型一眼看出素材新旧
+      return (j + 1) + '. ' + dt + (it.title || '') + '\n链接：' + (it.url || '') + (sn ? '\n摘要：' + sn : '');
     };
     const searchTexts = rows.map((row) => {
       let base;
