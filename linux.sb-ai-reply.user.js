@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.10
+// @version      2.11.11
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1664,11 +1664,21 @@
     const unit = m[2].toLowerCase();
     const base = now || new Date();
     const d = new Date(base.getTime());
+    // 按「年/月」回退必须钳制月末，否则会被 JS 的日期溢出反向带跑：
+    // 在 3-31 调 setMonth(-1) 得到「2 月 31 日」→ 自动溢出成 3 月 3 日（比真实时间晚了一个月）。
+    // 做法：先把日号归到 1 号再改月/年，最后把日号取回「原日号与目标月最后一天」的较小值。
+    const shiftMonths = (months) => {
+      const day = d.getDate();
+      d.setDate(1);
+      d.setMonth(d.getMonth() - months);
+      const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+      d.setDate(Math.min(day, lastDay));
+    };
     if (unit === 'hour') d.setHours(d.getHours() - n);
     else if (unit === 'day') d.setDate(d.getDate() - n);
     else if (unit === 'week') d.setDate(d.getDate() - n * 7);
-    else if (unit === 'month') d.setMonth(d.getMonth() - n);
-    else d.setFullYear(d.getFullYear() - n);
+    else if (unit === 'month') shiftMonths(n);
+    else shiftMonths(n * 12); // 年也走同一条路径：2-29 减 1 年会溢出成 3-1
     const s = fmtPubDate(d.toISOString(), base);
     return s ? ('约' + s) : '';
   }
@@ -3153,9 +3163,8 @@
     if (resume) {
       progress('⏩ 从存档点续跑：跳过规划与搜索，直接重试 AI 挑选…');
       appendLog('───── ⏩ 续跑：复用上面的搜索结果（跳过规划与重新搜索）─────', 'done');
-      ddgFailStreak = 0;
-      braveFailStreak = 0;
-      braveQueue = Promise.resolve();
+      // 注：熔断状态（ddgFailStreak / braveFailStreak / braveQueue）不在这里重置——
+      // 下面搜索阶段开头会无条件重置一次，这里再写一遍是重复的
     }
 
     // 阶段1：规划关键词（不带搜索工具，输出 {kw, fallback} 关键词对）
