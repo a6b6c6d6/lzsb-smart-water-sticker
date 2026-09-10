@@ -1932,30 +1932,55 @@
         method: 'GET',
         url: 'https://news.google.com/rss/articles/' + id,
         timeout: to,
-        headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+        headers: {
+          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Upgrade-Insecure-Requests': '1'
+        },
         onload: (resp) => {
           if (!(resp.status >= 200 && resp.status < 300)) { resolve({ url: '', note: '取签名页 HTTP' + resp.status }); return; }
           const html = resp.responseText || '';
           const sg = (html.match(/data-n-a-sg="([^"]+)"/) || [])[1] || '';
           const ts = (html.match(/data-n-a-ts="([^"]+)"/) || [])[1] || '';
           if (!sg || !ts) { resolve({ url: '', note: '未取到签名(页面结构变化或被拦)' }); return; }
-          const inner = '["garturlreq",[["X","X",["X","X"],null,null,1,1,"US:en",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],"X","X",1,[2,3,4,8],1,0,"655000234",0,0,null,0],"' + id + '",' + ts + ',"' + sg + '"]';
-          const payload = JSON.stringify([[['Fbv4je', inner, null, 'generic']]]);
+          // payload 结构对齐社区新版：配置数组与旧版不同，且只 2 元素 [rpcId, inner]
+          const inner = '["garturlreq",[["X","X",["X","X"],null,null,1,1,"US:en",null,1,null,null,null,null,null,0,1],"X","X",1,[1,1,1],1,1,null,0,0,null,0],"' + id + '",' + ts + ',"' + sg + '"]';
+          const payload = JSON.stringify([[['Fbv4je', inner]]]);
           gmRequest({
             method: 'POST',
             url: 'https://news.google.com/_/DotsSplashUi/data/batchexecute',
             timeout: to,
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8', 'Referer': 'https://news.google.com/' },
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+              'Origin': 'https://news.google.com',
+              'Referer': 'https://news.google.com/'
+            },
             data: 'f.req=' + encodeURIComponent(payload),
             onload: (r2) => {
               if (!(r2.status >= 200 && r2.status < 300)) { resolve({ url: '', note: 'batchexecute HTTP' + r2.status }); return; }
-              // 响应里 URL 是转义形式（\/ \u0026），先反转义再定位 garturlres 后的首个 http(s) 地址
-              const un = String(r2.responseText || '').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-              const gi = un.indexOf('garturlres');
-              if (gi === -1) { resolve({ url: '', note: '无garturlres:' + un.slice(0, 90).replace(/\s+/g, ' ') }); return; }
-              const m = un.slice(gi).match(/https?:\/\/[^"\\\s]+/);
-              if (!m) { resolve({ url: '', note: 'garturlres 未含 URL' }); return; }
-              resolve({ url: m[0], note: 'batchexecute 解码' });
+              const txt = String(r2.responseText || '');
+              let url = '';
+              // 新格式解析：响应以 \n\n 分块，第二块为 JSON 数组；取 wrb.fr/w779db + Fbv4je 项的第 3 元素（内层 JSON 字符串）的第 2 项
+              try {
+                const parts = txt.split('\n\n');
+                const js = (parts.length > 1 ? parts[1] : txt).replace(/^\)\]\}'\s*/, '');
+                const arr = JSON.parse(js);
+                if (Array.isArray(arr)) {
+                  const hit = arr.find((d) => Array.isArray(d) && (d[0] === 'wrb.fr' || d[0] === 'w779db') && d[1] === 'Fbv4je' && d[2]);
+                  if (hit) {
+                    const innerJ = JSON.parse(hit[2]);
+                    if (Array.isArray(innerJ) && typeof innerJ[1] === 'string' && /^https?:\/\//i.test(innerJ[1])) url = innerJ[1];
+                  }
+                }
+              } catch (e) { /* 走兜底解析 */ }
+              if (!url) {
+                // 兜底：反转义后定位 garturlres 后的首个 http(s) 地址
+                const un = txt.replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+                const gi = un.indexOf('garturlres');
+                if (gi !== -1) { const m = un.slice(gi).match(/https?:\/\/[^"\\\s]+/); if (m) url = m[0]; }
+                else { resolve({ url: '', note: '无garturlres:' + un.slice(0, 90).replace(/\s+/g, ' ') }); return; }
+              }
+              resolve(url ? { url: url, note: 'batchexecute 解码' } : { url: '', note: '解码结果非 URL' });
             },
             onerror: () => resolve({ url: '', note: 'batchexecute 网络错误' }),
             ontimeout: () => resolve({ url: '', note: 'batchexecute 超时' }),
