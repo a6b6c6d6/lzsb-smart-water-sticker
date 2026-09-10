@@ -1897,6 +1897,60 @@
     return keep.join(' ').replace(/\s+/g, ' ').trim();
   }
 
+  // Google News 中转链接解码（移植自社区项目 googlenewsdecoder / google-news-url-decoder 的两层方案）：
+  // ① 旧格式：articles/ 后的 base64 离线解（去前缀 08 13 22 / 后缀 d2 01 00 / 按首字节长度取串）→ 直接得原站 URL
+  // ② 新格式（解出 AU_yqL…）：POST Google 内部 batchexecute（rpcids=Fbv4je），从响应提取 ["garturlres","<原站URL>"]
+  function decodeGNewsIdOffline(id) {
+    try {
+      let b64 = String(id || '').replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      let s = atob(b64);
+      const prefix = String.fromCharCode(0x08, 0x13, 0x22);
+      if (s.startsWith(prefix)) s = s.slice(prefix.length);
+      const suffix = String.fromCharCode(0xd2, 0x01, 0x00);
+      if (s.endsWith(suffix)) s = s.slice(0, -suffix.length);
+      const len = s.charCodeAt(0);
+      const out = (len >= 0x80) ? s.substring(2, len + 1) : s.substring(1, len + 1);
+      return /^https?:\/\//i.test(out) ? out : '';
+    } catch (e) { return ''; }
+  }
+  function decodeGNewsUrl(url, timeoutSec) {
+    let u = null;
+    try { u = new URL(url); } catch (e) { return Promise.resolve(''); }
+    if (!/(^|\.)news\.google\.com$/i.test(u.hostname)) return Promise.resolve('');
+    const parts = u.pathname.split('/');
+    const ai = parts.indexOf('articles');
+    const id = ai >= 0 ? parts[ai + 1] : parts[parts.length - 1];
+    if (!id) return Promise.resolve('');
+    const offline = decodeGNewsIdOffline(id); // 旧格式零请求直接得原站
+    if (offline) return Promise.resolve(offline);
+    // 新格式：batchexecute 换原站 URL（模板与 rpcids 为社区验证过的固定值）
+    const payload = '[[["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"' + id + '\\"]",null,"generic"]]]';
+    return new Promise((resolve) => {
+      gmRequest({
+        method: 'POST',
+        url: 'https://news.google.com/_/DotsSplashUi/data/batchexecute?rpcids=Fbv4je',
+        timeout: (timeoutSec || 12) * 1000,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8', 'Referer': 'https://news.google.com/' },
+        data: 'f.req=' + encodeURIComponent(payload),
+        onload: (resp) => {
+          const txt = resp.responseText || '';
+          const header = '["garturlres","';
+          const fi = txt.indexOf(header);
+          if (fi === -1) { resolve(''); return; }
+          const rest = txt.slice(fi + header.length);
+          const end = rest.indexOf('",');
+          if (end === -1) { resolve(''); return; }
+          const real = rest.slice(0, end).replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+          resolve(/^https?:\/\//i.test(real) ? real : '');
+        },
+        onerror: () => resolve(''),
+        ontimeout: () => resolve(''),
+        onabort: () => resolve('')
+      });
+    });
+  }
+
   // Google News 中转链接「换源定位」：中转页在无 JS 环境下抓不到正文，
   // 改用条目标题在 DDG 搜一次，取首个非 Google News 的结果 URL 作为真实抓取目标。
   // resolve 原站 URL；定位不到 resolve ''（调用方退回原 URL 或降级摘要）。
@@ -2779,14 +2833,19 @@
         if (isSameSite(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true }); continue; }
         if (isDeepBlocked(c.url)) { steps.push({ key: key, title: c.title, url: c.url, ok: false, skip: true, info: '强反爬站，保留摘要' }); continue; }
         try {
-          // Google News 中转链接：无 JS 环境抓不到，先用标题换源定位原站（DDG 搜一次）
+          // Google News 中转链接：优先解码出原站 URL（社区两层方案），失败再用标题换源定位
           let targetUrl = c.url;
           let host0 = '';
           try { host0 = new URL(c.url).hostname; } catch (e) { /* 保持空 */ }
           if (/(^|\.)news\.google\.com$/i.test(host0)) {
-            const located = await stopRace(locateNewsSource(cfg, c.title));
+            const decoded = await stopRace(decodeGNewsUrl(c.url, 12));
             checkStop();
-            if (located) targetUrl = located;
+            if (decoded) targetUrl = decoded;
+            else {
+              const located = await stopRace(locateNewsSource(cfg, c.title));
+              checkStop();
+              if (located) targetUrl = located;
+            }
           }
           const txt = await stopRace(fetchPageText(targetUrl, 12));
           checkStop();
