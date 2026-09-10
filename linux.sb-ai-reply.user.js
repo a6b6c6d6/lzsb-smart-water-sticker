@@ -1924,29 +1924,46 @@
     if (!id) return Promise.resolve({ url: '', note: '未取到文章 ID' });
     const offline = decodeGNewsIdOffline(id); // 旧格式零请求直接得原站
     if (offline) return Promise.resolve({ url: offline, note: '离线解码' });
-    // 新格式：batchexecute 换原站 URL（模板与 rpcids 为社区验证过的固定值）
-    const payload = '[[["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"' + id + '\\"]",null,"generic"]]]';
+    // 新格式（AU_yqL…）：Google 已要求带签名调用——先取文章页的 data-n-a-sg（签名）/data-n-a-ts（时间戳），
+    // 再 POST batchexecute（模板与参数顺序为社区验证过的固定值）
+    const to = (timeoutSec || 12) * 1000;
     return new Promise((resolve) => {
       gmRequest({
-        method: 'POST',
-        url: 'https://news.google.com/_/DotsSplashUi/data/batchexecute?rpcids=Fbv4je',
-        timeout: (timeoutSec || 12) * 1000,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8', 'Referer': 'https://news.google.com/' },
-        data: 'f.req=' + encodeURIComponent(payload),
+        method: 'GET',
+        url: 'https://news.google.com/rss/articles/' + id,
+        timeout: to,
+        headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
         onload: (resp) => {
-          if (!(resp.status >= 200 && resp.status < 300)) { resolve({ url: '', note: 'batchexecute HTTP' + resp.status }); return; }
-          const txt = resp.responseText || '';
-          const header = '["garturlres","';
-          const fi = txt.indexOf(header);
-          if (fi === -1) { resolve({ url: '', note: '无garturlres:' + txt.slice(0, 90).replace(/\s+/g, ' ') }); return; }
-          const rest = txt.slice(fi + header.length);
-          const end = rest.indexOf('",');
-          if (end === -1) { resolve({ url: '', note: 'garturlres 未闭合' }); return; }
-          const real = rest.slice(0, end).replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-          resolve(/^https?:\/\//i.test(real) ? { url: real, note: 'batchexecute 解码' } : { url: '', note: '解码结果非 URL' });
+          if (!(resp.status >= 200 && resp.status < 300)) { resolve({ url: '', note: '取签名页 HTTP' + resp.status }); return; }
+          const html = resp.responseText || '';
+          const sg = (html.match(/data-n-a-sg="([^"]+)"/) || [])[1] || '';
+          const ts = (html.match(/data-n-a-ts="([^"]+)"/) || [])[1] || '';
+          if (!sg || !ts) { resolve({ url: '', note: '未取到签名(页面结构变化或被拦)' }); return; }
+          const inner = '["garturlreq",[["X","X",["X","X"],null,null,1,1,"US:en",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],"X","X",1,[2,3,4,8],1,0,"655000234",0,0,null,0],"' + id + '",' + ts + ',"' + sg + '"]';
+          const payload = JSON.stringify([[['Fbv4je', inner, null, 'generic']]]);
+          gmRequest({
+            method: 'POST',
+            url: 'https://news.google.com/_/DotsSplashUi/data/batchexecute',
+            timeout: to,
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8', 'Referer': 'https://news.google.com/' },
+            data: 'f.req=' + encodeURIComponent(payload),
+            onload: (r2) => {
+              if (!(r2.status >= 200 && r2.status < 300)) { resolve({ url: '', note: 'batchexecute HTTP' + r2.status }); return; }
+              // 响应里 URL 是转义形式（\/ \u0026），先反转义再定位 garturlres 后的首个 http(s) 地址
+              const un = String(r2.responseText || '').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+              const gi = un.indexOf('garturlres');
+              if (gi === -1) { resolve({ url: '', note: '无garturlres:' + un.slice(0, 90).replace(/\s+/g, ' ') }); return; }
+              const m = un.slice(gi).match(/https?:\/\/[^"\\\s]+/);
+              if (!m) { resolve({ url: '', note: 'garturlres 未含 URL' }); return; }
+              resolve({ url: m[0], note: 'batchexecute 解码' });
+            },
+            onerror: () => resolve({ url: '', note: 'batchexecute 网络错误' }),
+            ontimeout: () => resolve({ url: '', note: 'batchexecute 超时' }),
+            onabort: () => resolve({ url: '', note: '已取消' })
+          });
         },
-        onerror: () => resolve({ url: '', note: 'batchexecute 网络错误' }),
-        ontimeout: () => resolve({ url: '', note: 'batchexecute 超时' }),
+        onerror: () => resolve({ url: '', note: '取签名页网络错误' }),
+        ontimeout: () => resolve({ url: '', note: '取签名页超时' }),
         onabort: () => resolve({ url: '', note: '已取消' })
       });
     });
