@@ -361,9 +361,12 @@
     /* 批量搜索结果按词分节的小节标题（详情弹窗内） */
     .lsb-ai-batch-word { font-size: 12px; font-weight: 700; color: #1e40af; margin: 8px 0 4px; padding-bottom: 3px; border-bottom: 1px dashed #bfdbfe; }
     .lsb-ai-batch-word:first-child { margin-top: 0; }
-    /* 搜索结果来源徽标（按来源着色：DDG/GN/SO/GH/HN/Bing/SearX） */
+    /* 搜索结果来源徽标（按来源着色：GN/BN/Brave/Bing/DDG/SO/GH/HN/SearX）
+       BN=Bing News(青绿，与 Bing 网页版蓝区分开)；Brave=玫红 */
     .lsb-src-badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 5px; margin-right: 5px; border-radius: 4px; vertical-align: 1px; line-height: 1.6; }
     .lsb-src-bing { background: #dbeafe; color: #1d4ed8; }
+    .lsb-src-bn { background: #d1fae5; color: #047857; }
+    .lsb-src-brave { background: #ffe4e6; color: #be123c; }
     .lsb-src-ddg { background: #ede9fe; color: #6d28d9; }
     .lsb-src-gn { background: #fee2e2; color: #b91c1c; }
     .lsb-src-so { background: #ffedd5; color: #c2410c; }
@@ -1668,11 +1671,11 @@
       label: '官方 API 多源聚合（技术向·免Key·零反爬）'
     },
     // smart：按查询语言自动路由（推荐默认）——
-    // 中文词：Bing News + Brave + Bing 网页 三路并行竞速（按质量优先级合并）→ Google News → DDG 末位熔断；
-    // 英文词：SO+GitHub+HN 并行 → Brave → Bing → DDG
+    // 中文词：Google News ＋ Bing News ＋ Brave 三主源并行竞速（轮转合并）→ DDG；Bing 网页版仅作末位兜底；
+    // 英文词：SO+GitHub+HN 并行 → 若空则同上三主源竞速 → DDG
     smart: {
       smart: true,
-      label: '智能路由（中英分流·多源并行·质量优先）'
+      label: '智能路由（中英分流·多主源并行·Bing 网页版仅末位兜底）'
     }
   };
   // SearXNG 公共实例池（内存轮换序：成功实例被提到队首）
@@ -1680,6 +1683,10 @@
   let searxOrder = SEARX_INSTANCES.slice();
   // DDG 会话级熔断计数（一轮搜索内连续失败达阈值即跳过 DDG，避免反复卡超时；每轮开始时重置）
   let ddgFailStreak = 0;
+  // Brave 会话级熔断 + 串行队列：Brave 对**并发**请求直接 429（实测 3 并发 × 3 轮 = 9/9 全 429，
+  // 而串行逐个请求可稳定成功），故同一时刻只允许一个在途请求，并在连续失败达阈值后本轮跳过。
+  let braveFailStreak = 0;
+  let braveQueue = Promise.resolve();
 
   // multi 引擎的子源定义（实测可达：hn.algolia / api.stackexchange / api.github / news.google RSS）
   const MULTI_SOURCES = [
@@ -2265,6 +2272,19 @@
           if (ddgFailStreak >= 2) return Promise.resolve({ ok: false, err: '已熔断(本轮连续' + ddgFailStreak + '次失败)' });
           return fetchItems(ddgE.buildUrl(q), htmlParse(ddgE), 'DDG').then((r) => { if (!r.ok) ddgFailStreak += 1; return r; });
         };
+        // Brave 串行 + 熔断：并发会被 429（实测全 429），用队列保证同一时刻只有一个在途请求；
+        // 连续失败 2 次即本轮熔断（不再浪费请求、不再拖慢批次），成功一次即清零。跨轮重置。
+        const fetchBrave = (q) => {
+          const run = braveQueue.then(() => {
+            if (braveFailStreak >= 2) return { ok: false, err: '已熔断(本轮连续' + braveFailStreak + '次失败)', tag: 'Brave' };
+            return fetchItems(braveE.buildUrl(q), htmlParse(braveE), 'Brave').then((r) => {
+              if (r.ok) braveFailStreak = 0; else braveFailStreak += 1;
+              return r;
+            });
+          });
+          braveQueue = run.then(() => {}, () => {});
+          return run;
+        };
         // 并行竞速（带优先级 + 末位源）：多源同时发，首个成功者触发「宽限期」——宽限内到达的其他源一并合并，
         // 宽限结束即返回，不等慢源（保证速度，也让「直连时 Brave 超时」之类的慢源不拖后腿）。
         // 合并规则：
@@ -2320,24 +2340,23 @@
             let items = null;
             const tagItems = (arr, tag) => arr.map((it) => Object.assign({}, it, { src: tag }));
             if (isCJK) {
-              // 中文链路（按实测质量重排）：Bing News(资讯·0.67s) ＋ Brave(独立索引·质量最高) 为主源，
-              // Bing 网页版降为「末位源」——它对中文新闻查询返回大量 SEO 引流站（gemini-cnblog / claudezh 之类），
-              // 只在主源全空（典型=国内直连、Brave 被墙）时才启用。
-              // 主源轮转合并 + 截 topK，宽限 1.2s：代理下 ~0.7s 出结果，直连下 Brave 超时也不拖累（Bing 一到就返回）。
+              // 中文链路（按实测「质量 × 可用性」定序）：
+              //   · Google News RSS —— 中文资讯最强、实测 0.86~5.8s；通用词也给高质量文章
+              //     （实测「nginx 配置」返回 50 条 OSCHINA/InfoQ/36kr）→ 主源第 1 位
+              //   · Bing News RSS —— 0.67s / 纯 XML / 真新闻 → 主源第 2 位
+              //   · Brave —— 质量最高但要串行（并发必 429）→ 主源第 3 位（带熔断）
+              //   · Bing 网页版 —— SEO 引流站多（gemini-cnblog / claudezh / chatgpt-guides 之类），
+              //     降为「末位源」：只负责触发返回、避免干等，条目仅在主源全空（典型=国内直连）时启用
+              // 主源之间轮转取条合并 + 截 topK；宽限 2.5s（给 GN/Brave 留出到达时间，兼顾质量与速度）
               const picked = await raceFirstOk([
+                fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN').then((r) => { if (!r.ok) errLog.push('GN:' + (r.err || '失败')); return r; }),
                 fetchItems(BING_NEWS_SOURCE.build(query), (txt) => BING_NEWS_SOURCE.extractXml(txt), 'BN').then((r) => { if (!r.ok) errLog.push('BN:' + (r.err || '失败')); return r; }),
-                fetchItems(braveE.buildUrl(query), htmlParse(braveE), 'Brave').then((r) => { if (!r.ok) errLog.push('Brave:' + (r.err || '失败')); return r; }),
+                fetchBrave(query).then((r) => { if (!r.ok) errLog.push('Brave:' + (r.err || '失败')); return r; }),
                 fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing').then((r) => { if (!r.ok) errLog.push('Bing:' + (r.err || '失败')); return r; })
-              ], 1200, 2);
+              ], 2500, 3);
               checkStop();
               if (picked && picked.length) items = mergeItems([picked]);
-              // 三路皆空 → Google News（中文资讯强，原站链接可走深抓解码）→ 再不行才末位 DDG（带熔断）
-              if (!items || !items.length) {
-                const gnR = await fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN');
-                checkStop();
-                if (gnR.ok) items = tagItems(gnR.items, 'GN');
-                else errLog.push('GN:' + (gnR.err || '失败'));
-              }
+              // 主源与末位源都空 → 只剩 DDG（带熔断）
               if (!items || !items.length) {
                 const ddgR = await tryDdg(query);
                 if (ddgR && ddgR.ok) items = tagItems(ddgR.items, 'DDG');
@@ -2350,17 +2369,15 @@
               if (ok.length) items = mergeItems(ok.map((o) => tagItems(o.items, o.tag)));
               else {
                 outs.forEach((o) => errLog.push(o.tag + ':' + (o.err || '失败')));
-                // 英文垂直源空 → Brave（独立索引·通用覆盖好）→ Bing → 末位 DDG
-                const braveR = await fetchItems(braveE.buildUrl(query), htmlParse(braveE), 'Brave');
+                // 英文垂直源（SO/GH/HN）空 —— 典型场景是「非编程类话题」（如 ChatGPT 服务故障），
+                // 垂直源命不中。此时同样走「GN ＋ Brave 主源 + Bing 末位」竞速，避免直接掉进 Bing 的 SEO 结果。
+                const picked2 = await raceFirstOk([
+                  fetchItems(newsSrc.build(query), (txt) => newsSrc.extractXml(txt), 'GN').then((r) => { if (!r.ok) errLog.push('GN:' + (r.err || '失败')); return r; }),
+                  fetchBrave(query).then((r) => { if (!r.ok) errLog.push('Brave:' + (r.err || '失败')); return r; }),
+                  fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing').then((r) => { if (!r.ok) errLog.push('Bing:' + (r.err || '失败')); return r; })
+                ], 2500, 2);
                 checkStop();
-                if (braveR.ok) items = tagItems(braveR.items, 'Brave');
-                else errLog.push('Brave:' + (braveR.err || '失败'));
-                if (!items || !items.length) {
-                  const bingR2 = await fetchItems(bingE.buildUrl(query), htmlParse(bingE), 'Bing');
-                  checkStop();
-                  if (bingR2.ok) items = tagItems(bingR2.items, 'Bing');
-                  else errLog.push('Bing:' + (bingR2.err || '失败'));
-                }
+                if (picked2 && picked2.length) items = mergeItems([picked2]);
                 if (!items || !items.length) {
                   const ddgR2 = await tryDdg(query);
                   if (ddgR2 && ddgR2.ok) items = tagItems(ddgR2.items, 'DDG');
@@ -2945,6 +2962,8 @@
     const seenCandidate = Object.create(null); // 归一化 URL → true，跨词去重用
     resetSearchSummary();
     ddgFailStreak = 0; // 每轮搜索重新试探 DDG（上一轮熔断不带入本轮）
+    braveFailStreak = 0; // 同上：Brave 熔断与串行队列每轮重置
+    braveQueue = Promise.resolve();
     let sumOk = 0;
     let sumFail = 0;
     const allBatchTips = []; // 全部批次的词结果段，累积进汇总行 tip
@@ -4020,7 +4039,7 @@
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">联网搜索源</label>
               <select class="lsb-ai-select" id="lsb-ai-cfg-searchEngine">
-                <option value="smart">智能路由（推荐·中英分流·Bing News/Brave/Bing 多源并行·质量优先）</option>
+                <option value="smart">智能路由（推荐·中英分流·GN/BingNews/Brave 多主源并行）</option>
                 <option value="brave">Brave Search（质量最高·独立索引·国内需代理）</option>
                 <option value="bing">Bing 直连（通用兜底·结果偏杂）</option>
                 <option value="api">中转站内置 web_search（原方式·需模型/中转站支持）</option>
