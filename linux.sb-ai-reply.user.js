@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.11.12
-// @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文
+// @version      2.12.0
+// @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。联网搜索为智能路由多主源（GoogleNews/BingNews/Brave 并行竞速，免 Key）+ Google News 链接解码 + 深抓网页正文。v2.12.0：① 悬浮标改为可自由拖动（位置持久化 / 视口钳制 / 右键复位），面板跟随悬浮标弹出；② 适配「LINUX SB 液态玻璃质感」脚本——默认位置避让它右下角的设置悬浮球（原来被压住半边点不到）、「极速滚动」模式下悬浮标仍可点可拖、并在该脚本存在时自动换成液态玻璃皮肤，脚本不在时保持原蓝色胶囊外观
 // @author       WorkBuddy
 // @match        https://linux.sb/*
 // @grant        GM_xmlhttpRequest
@@ -132,25 +132,169 @@
    * ============================================================ */
 
   const CSS = `
+    /* ---------- 悬浮标 ----------
+       默认外观 = 原来的蓝色胶囊（未装「液态玻璃」脚本时就是这个样子，视觉零变化）。
+       装了就由下面 html.lsb-ready 那一块接管成毛玻璃皮肤。
+       定位说明：right 取 84px 而不是 24px，是为了避让「LINUX SB 液态玻璃质感」脚本
+       固定在右下角 24px 处的 46×46 设置悬浮球（#lsb-settings-toggle-btn），
+       否则本站悬浮标会盖住它半边、导致那颗齿轮点不动。 */
     #${FAB_ID} {
       position: fixed;
-      right: 24px;
+      right: 84px;
       bottom: 24px;
       z-index: 2147483000;
       padding: 10px 18px;
-      border: none;
+      /* 透明边框：让「装了玻璃脚本」与「没装」两种状态下按钮外框尺寸完全一致 */
+      border: 1.5px solid transparent;
       border-radius: 24px;
       background: linear-gradient(135deg, #3b82f6, #6366f1);
       color: #fff;
       font-size: 14px;
       font-weight: 600;
-      cursor: pointer;
+      cursor: grab;
       box-shadow: 0 4px 16px rgba(59, 130, 246, .4);
       transition: transform .15s ease, box-shadow .15s ease;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+      /* 触屏下必须为 none，否则拖拽手势会被浏览器的滚动手势抢走，pointermove 收不到 */
+      touch-action: none;
+      /* 液态玻璃脚本的「极速滚动」保护层是 html.lsb-scrolling * { pointer-events:none !important }，
+         滚动停止后还会残留 120ms。这里对悬浮标单点豁免（同为 !important，id 选择器特异性更高），
+         否则每次滚动完立刻去点/拖悬浮标都会失灵。 */
+      pointer-events: auto !important;
     }
     #${FAB_ID}:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(59, 130, 246, .5); }
     #${FAB_ID}:disabled { opacity: .6; cursor: not-allowed; }
+
+    /* ==================================================================
+     * 液态玻璃质感（LINUX SB 液态玻璃质感 v1.7.x）适配层
+     * ==================================================================
+     * 检测点：该脚本在 DOM 就绪时给 <html> 加 .lsb-ready，并把 --lsb-* 令牌挂在 :root。
+     * 没装这个脚本时下面整块都不匹配，悬浮标/面板保持原样，零副作用。
+     *
+     * ⚠️ 为什么到处是 !important：
+     *   该脚本有一条全站按钮统一规范——
+     *     .btn:not(.nb-editor-btn), button:not(.nb-editor-btn), [role="button"], input[type=submit] … {
+     *         background: rgba(255,255,255,.42) !important;  border: 1px solid … !important;
+     *         color: var(--text) !important;                 border-radius: 999px !important;
+     *         box-shadow: … !important;                      backdrop-filter: blur(10px) … !important;
+     *         transition: all .25s … !important;             cursor: pointer !important; }
+     *   它按标签名匹配，所以本脚本的悬浮标（<button>）、面板里 14 个按钮、以及插在
+     *   .post-ops 里的「水它」按钮会被一起刷成白色玻璃胶囊，抹掉全部语义配色。
+     *   同为 !important 时按特异性决胜，所以这里统一用「html.lsb-ready + 本脚本类/id」
+     *   把原设计抢回来。
+     * ================================================================== */
+
+    /* ---------- 悬浮标：换成跟玻璃脚本设置悬浮球同款的毛玻璃胶囊 ---------- */
+    html.lsb-ready #${FAB_ID} {
+      /* 用 --lsb-glass-bg-elevated / --text 而不是写死白色：深色模式下这组令牌会自动翻转，
+         否则会出现「浅色底 + 白字」的不可读组合（玻璃脚本那条通配规范就是写死 rgba(255,255,255,.42)） */
+      background: var(--lsb-glass-bg-elevated, rgba(255, 255, 255, .55)) !important;
+      color: var(--text, #1f2937) !important;
+      border: 1.5px solid var(--lsb-glass-border, rgba(255, 255, 255, .6)) !important;
+      border-radius: 999px !important;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .15),
+                  var(--lsb-glass-shine, inset 1px 1px 1px rgba(255, 255, 255, .85)) !important;
+      -webkit-backdrop-filter: blur(var(--lsb-blur-modal, 14px)) saturate(180%) !important;
+      backdrop-filter: blur(var(--lsb-blur-modal, 14px)) saturate(180%) !important;
+      cursor: grab !important; /* 通配规范里写死 pointer，会把「可拖动」的暗示抹掉 */
+      transition: transform .3s var(--lsb-ease-spring, ease), box-shadow .3s ease,
+                  background-color .25s ease, border-color .25s ease !important;
+    }
+    html.lsb-ready #${FAB_ID}:hover {
+      transform: translateY(-2px) scale(1.04);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, .22),
+                  var(--lsb-glass-shine, inset 1px 1px 1px rgba(255, 255, 255, .85)) !important;
+    }
+
+    /* ---------- 拖拽态（悬浮标与面板共用） ---------- */
+    #${FAB_ID}.lsb-dragging,
+    html.lsb-ready #${FAB_ID}.lsb-dragging {
+      cursor: grabbing !important;
+      /* 必须是 !important：通配规范里的 transition: all .25s !important 会让拖拽变成
+         「按钮慢半拍追鼠标」，这是功能性缺陷，不是观感问题 */
+      transition: none !important;
+      transform: none !important; /* 覆盖 hover 的 translateY/scale */
+    }
+    #${PANEL_ID}.lsb-dragging .lsb-ai-header { cursor: grabbing; }
+
+    /* ---------- 抗「全站按钮统一规范」：把本脚本按钮的语义配色抢回来 ----------
+       被抹掉的直接影响（按严重程度）：
+         1. 帖子里的「水它」按钮选中后毫无视觉变化 —— 看不出正在针对哪条评论水
+         2. 面板「水评论 / 水投票」的选中态消失 —— 分不清当前处于哪个模式
+         3. 主按钮（抓取并生成回复）、停止按钮丢掉颜色权重
+       ⚠️ 下面取值与 .lsb-ai-btn-* / .lsb-mode-btn / .lsb-water-btn 等原始定义一一对应，
+          以后改动原配色时这里要同步改。 */
+    html.lsb-ready #${PANEL_ID} button,
+    html.lsb-ready body .lsb-water-btn,
+    html.lsb-ready .lsb-ai-log-modal-copy,
+    html.lsb-ready .lsb-ai-log-modal-close {
+      /* 本脚本的面板主体是不透明的，按钮用不上毛玻璃；顺手省掉十几个多余合成层 */
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+      box-shadow: none !important;
+      transition: background .15s ease, color .15s ease, border-color .15s ease !important;
+    }
+    /* 帖子里注入的「水它」按钮。
+       注意这里必须带 body：玻璃脚本的 .post-ops button:not(.nb-editor-btn) 本身也是
+       (0,2,1) 特异性，跟「html.lsb-ready .lsb-water-btn」打平；而它有个 headObserver 会把自己
+       的 <style> 反复搬到 <head> 末尾，平手时按顺序它反而赢。所以这里补一个 body 把特异性
+       提到 (0,2,2) 压过它。 */
+    html.lsb-ready body .lsb-water-btn { background: #eff6ff !important; color: #2563eb !important; border: 1px solid #bfdbfe !important; border-radius: 6px !important; }
+    html.lsb-ready body .lsb-water-btn:hover { background: #dbeafe !important; color: #1d4ed8 !important; }
+    html.lsb-ready body .lsb-water-btn.lsb-active { background: #2563eb !important; color: #fff !important; border-color: #2563eb !important; }
+
+    html.lsb-ready #${PANEL_ID} .lsb-ai-close { background: transparent !important; color: #6b7280 !important; border: none !important; border-radius: 6px !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-close:hover { background: #e5e7eb !important; color: #111827 !important; }
+
+    html.lsb-ready #${PANEL_ID} .lsb-mode-btn { background: #f3f4f6 !important; color: #4b5563 !important; border: 1px solid #d1d5db !important; border-radius: 8px !important; transition: all .15s ease !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-mode-btn:hover { background: #e5e7eb !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-mode-btn.is-active { background: #2563eb !important; border-color: #2563eb !important; color: #fff !important; }
+
+    html.lsb-ready #${PANEL_ID} .lsb-ai-btn { border: none !important; border-radius: 8px !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-btn-primary { background: #2563eb !important; color: #fff !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-btn-primary:hover:not(:disabled) { background: #1d4ed8 !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-btn-secondary { background: #f3f4f6 !important; color: #1f2937 !important; border: 1px solid #d1d5db !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-btn-secondary:hover:not(:disabled) { background: #e5e7eb !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-btn-stop { background: #fee2e2 !important; color: #b91c1c !important; border: 1px solid #fecaca !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-btn-stop:hover:not(:disabled) { background: #fecaca !important; }
+
+    html.lsb-ready #${PANEL_ID} .lsb-ai-model-tbtn { background: #fff !important; color: #374151 !important; border: 1px solid #d1d5db !important; border-radius: 6px !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-model-tbtn:hover { background: #f3f4f6 !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-model-caret { background: transparent !important; color: #9ca3af !important; border: none !important; border-radius: 0 8px 8px 0 !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-model-caret:hover,
+    html.lsb-ready #${PANEL_ID} .lsb-ai-model-dd.open .lsb-ai-model-caret { background: #f3f4f6 !important; color: #2563eb !important; }
+
+    html.lsb-ready #${PANEL_ID} .lsb-ai-profile-dd-trigger { background: #fff !important; color: #1f2937 !important; border: 1px solid #d1d5db !important; border-radius: 8px !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-profile-dd-act { background: transparent !important; color: #6b7280 !important; border: none !important; border-radius: 6px !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-profile-dd-act:hover { background: #e5e7eb !important; color: #1f2937 !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-ai-profile-dd-act[data-act="del"]:hover { background: #fee2e2 !important; color: #dc2626 !important; }
+
+    html.lsb-ready #${PANEL_ID} .lsb-target-clear { background: #fff !important; color: #6b7280 !important; border: 1px solid #d1d5db !important; border-radius: 6px !important; }
+    html.lsb-ready #${PANEL_ID} .lsb-target-clear:hover { color: #dc2626 !important; border-color: #fca5a5 !important; }
+
+    /* 选中的目标评论高亮：站点给 .post-item 上了 !important 的玻璃底色，会把我们的
+       #f0f7ff 选中底色盖掉（只剩蓝框）。这里按浅/深两套把底色抢回来。
+       深色下不能用 #f0f7ff——玻璃脚本的正文文字在那时是白的，浅底配白字读不出来。 */
+    html.lsb-ready body li.lsb-target-highlight { background: #f0f7ff !important; }
+    html.lsb-ready[data-color-scheme-dark-mode-theme="dark"] body li.lsb-target-highlight,
+    html.lsb-ready[data-dark-mode-theme="dark"] body li.lsb-target-highlight {
+      background: rgba(37, 99, 235, .22) !important;
+    }
+
+    /* 独立浮层（日志详情弹窗、提示词编辑器）不在面板内，所以不加 #${PANEL_ID} 前缀 */
+    html.lsb-ready .lsb-ai-log-modal-copy { background: #2563eb !important; color: #fff !important; border: none !important; }
+    html.lsb-ready .lsb-ai-log-modal-copy:hover { background: #1d4ed8 !important; }
+    html.lsb-ready .lsb-ai-log-modal-copy.copied { background: #059669 !important; }
+    html.lsb-ready .lsb-ai-log-modal-close { background: #f3f4f6 !important; color: #1f2937 !important; border: 1px solid #d1d5db !important; }
+    html.lsb-ready .lsb-ai-log-modal-close:hover { background: #e5e7eb !important; }
+
+    /* 拖拽期间锁掉全站文本选中，避免拖动时把正文刷蓝 */
+    html.lsb-drag-lock, html.lsb-drag-lock * {
+      -webkit-user-select: none !important;
+      user-select: none !important;
+    }
 
     #${PANEL_ID} {
       position: fixed;
@@ -164,7 +308,10 @@
       background: #ffffff;
       color: #1f2937;
       border: 1px solid #e5e7eb;
-      border-radius: 14px;
+      /* 圆角跟液态玻璃脚本的大圆角语言（--lsb-radius，默认 20px）；没装脚本时仍是 14px。
+         面板主体故意保持不透明：它是工具窗口，正文/日志/状态色都按不透明白底设计，
+         改成 25% 透明的毛玻璃会让文字对比度塌掉。玻璃化只做在悬浮标这种「浮层」上。 */
+      border-radius: var(--lsb-radius, 14px);
       box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       font-size: 13px;
@@ -180,8 +327,10 @@
       padding: 10px 14px;
       background: #f9fafb;
       border-bottom: 1px solid #e5e7eb;
-      cursor: move;
+      cursor: grab;
       user-select: none;
+      -webkit-user-select: none;
+      touch-action: none; /* 触屏拖面板时别让浏览器把手势当滚动 */
     }
     .lsb-ai-title { font-weight: 600; font-size: 14px; }
     .lsb-ai-close {
@@ -3498,6 +3647,7 @@
 
   let panel = null;
   let fab = null;
+  let panelUserMoved = false; // 用户手动拖过面板后就不再自动贴到悬浮标旁边
   let statusEl = null;
   let previewEl = null;
   let generateBtn = null;
@@ -4491,9 +4641,35 @@
     fab.id = FAB_ID;
     fab.type = 'button';
     fab.textContent = '水贴专用';
+    fab.title = '单击：开关面板　·　按住拖动：移动位置（自动记住）　·　右键：回到右下角';
     document.body.appendChild(fab);
 
-    fab.addEventListener('click', () => togglePanel());
+    // 把 CSS 里的默认锚点（right/bottom）固化成 left/top，并恢复上次拖到的位置。
+    // 之后就一律以内联 left/top 为准：拖拽的位移基准取自它，hover 的 transform 再也影响不到坐标。
+    applyFabPos();
+
+    // 拖完松手时浏览器还会补发一个 click，用它把「拖拽」和「单击开关面板」区分开。
+    // 用一次性标志位而不是时间窗：只吃掉紧跟拖拽的那一次 click，不会误伤任何真实点击。
+    // 若拖拽以 pointercancel 收尾（没有补 click），下一次 pointerdown 会把它清掉。
+    let swallowClick = false;
+    fab.addEventListener('pointerdown', () => { swallowClick = false; });
+    fab.addEventListener('click', (e) => {
+      if (swallowClick) { swallowClick = false; e.preventDefault(); e.stopPropagation(); return; }
+      togglePanel();
+    });
+    fab.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      resetFabPos();
+    });
+    makeDraggable(fab, fab, {
+      onEnd: (moved) => {
+        if (!moved) return; // 没拖动 = 普通点击，交给上面的 click 处理
+        swallowClick = true;
+        const p = currentPos(fab);
+        saveFabPos(p.left, p.top);
+      }
+    });
+
     panel.querySelector('.lsb-ai-close').addEventListener('click', () => hidePanel());
 
     generateBtn.addEventListener('click', onGenerate);
@@ -4603,7 +4779,27 @@
       }
     });
 
-    makeDraggable(panel, panel.querySelector('.lsb-ai-header'));
+    makeDraggable(panel, panel.querySelector('.lsb-ai-header'), {
+      onEnd: (moved) => {
+        // 用户自己拖过面板之后，就不再自动贴回悬浮标旁边，尊重手动摆位
+        if (moved) panelUserMoved = true;
+      }
+    });
+    // 窗口尺寸变化后重新钳位：悬浮标始终留在视口内，未手动拖过的面板重新贴回悬浮标
+    window.addEventListener('resize', () => {
+      if (fab) {
+        const p = currentPos(fab);
+        placeEl(fab, p.left, p.top);
+      }
+      if (panel && !panel.classList.contains('lsb-hidden')) {
+        if (panelUserMoved) {
+          const p = currentPos(panel);
+          placeEl(panel, p.left, p.top);
+        } else {
+          anchorPanelToFab();
+        }
+      }
+    });
     writeConfigToUI(loadConfig());
 
     // 语气 / 提示词下拉 + 编辑弹窗
@@ -4630,41 +4826,214 @@
     refreshPersonaSelect();
   }
 
-  function makeDraggable(el, handle) {
-    let dragging = false;
-    let startX = 0, startY = 0, origLeft = 0, origTop = 0;
+  /* ------------------------------------------------------------
+   * 悬浮标 / 面板 的定位与拖拽
+   * ------------------------------------------------------------ */
 
-    handle.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.lsb-ai-close')) return;
-      dragging = true;
+  // 悬浮标默认锚点（右下角）。right 用 84 而不是 24 是为了避让「LINUX SB 液态玻璃质感」
+  // 脚本固定在同一角落的 46×46 设置悬浮球：#lsb-settings-toggle-btn{right:24px;bottom:24px}。
+  // 两者若都取 24/24 会叠在一起，本站悬浮标 z-index 更高，会把那颗齿轮压掉半边点不动。
+  const FAB_DEFAULT_RIGHT = 84;
+  const FAB_DEFAULT_BOTTOM = 24;
+  const DRAG_THRESHOLD = 5;  // px：位移不超过它就仍算「单击」，避免手抖把点击吃掉
+  const VIEWPORT_MARGIN = 8; // px：元素与视口边缘保留的最小间距
+
+  function clampToViewport(left, top, w, h) {
+    const maxLeft = Math.max(VIEWPORT_MARGIN, window.innerWidth - w - VIEWPORT_MARGIN);
+    const maxTop = Math.max(VIEWPORT_MARGIN, window.innerHeight - h - VIEWPORT_MARGIN);
+    return {
+      left: Math.min(Math.max(VIEWPORT_MARGIN, left), maxLeft),
+      top: Math.min(Math.max(VIEWPORT_MARGIN, top), maxTop)
+    };
+  }
+
+  // 统一改成 left/top 定位（right/bottom 置 auto），并钳进视口，返回钳制后的坐标。
+  // 用 offsetWidth/offsetHeight（布局尺寸，不含 transform）而不是 rect，避免 hover 的
+  // scale/translate 把尺寸算大。
+  function placeEl(el, left, top) {
+    const c = clampToViewport(left, top, el.offsetWidth, el.offsetHeight);
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    el.style.left = c.left + 'px';
+    el.style.top = c.top + 'px';
+    return c;
+  }
+
+  // 读元素当前位置：优先用内联 left/top；还没被安置过就用 rect 换算一次。
+  function currentPos(el) {
+    const l = parseFloat(el.style.left);
+    const t = parseFloat(el.style.top);
+    if (isNaN(l) || isNaN(t)) {
+      const r = el.getBoundingClientRect();
+      return { left: r.left, top: r.top };
+    }
+    return { left: l, top: t };
+  }
+
+  // 读元素在「没有 transform」时的视口坐标。
+  // 悬浮标 hover 上挂着 translateY(-2px) scale(1.04)，而 getBoundingClientRect 是含 transform 的，
+  // 直接量会把宽高放大 4%、坐标偏移约 2px；把量到的值存回去，位置就永久偏了。这里先摘掉
+  // transform、强制重排、量完立刻还回去（同一帧内完成，不会看到跳动）。
+  function measureUntransformed(el) {
+    const prev = el.style.transform;
+    el.style.transform = 'none';
+    void el.offsetWidth;
+    const r = el.getBoundingClientRect();
+    el.style.transform = prev;
+    return r;
+  }
+
+  function loadFabPos() {
+    const v = gmGet('fabPos', null);
+    if (!v || typeof v.l !== 'number' || typeof v.t !== 'number') return null;
+    if (!isFinite(v.l) || !isFinite(v.t)) return null;
+    return { l: v.l, t: v.t };
+  }
+
+  function saveFabPos(left, top) {
+    gmSet('fabPos', { l: Math.round(left), t: Math.round(top) });
+  }
+
+  // 恢复悬浮标位置：有存档用存档，没有就把 CSS 默认锚点固化成 left/top。
+  // 固化成内联 left/top 有个前提好处——之后所有拖拽都基于内联值算，元素自身 hover 的
+  // translateY(-2px) 不会污染起始坐标（getBoundingClientRect 是含 transform 的）。
+  function applyFabPos() {
+    if (!fab) return;
+    const saved = loadFabPos();
+    if (saved) { placeEl(fab, saved.l, saved.t); return; }
+    const r = measureUntransformed(fab);
+    placeEl(fab, r.left, r.top);
+  }
+
+  // 右键复位：清存档 + 回 CSS 默认锚点
+  function resetFabPos() {
+    if (!fab) return;
+    gmSet('fabPos', null);
+    fab.style.left = '';
+    fab.style.top = '';
+    fab.style.right = FAB_DEFAULT_RIGHT + 'px';
+    fab.style.bottom = FAB_DEFAULT_BOTTOM + 'px';
+    const r = measureUntransformed(fab);
+    placeEl(fab, r.left, r.top);
+    console.log('[水贴专用] 悬浮标已复位到右下角默认位置');
+    if (panel && !panel.classList.contains('lsb-hidden')) setStatus('悬浮标位置已复位', 'ok');
+  }
+
+  /**
+   * 指针拖拽（Pointer Events，鼠标 / 触屏 / 手写笔统一）。
+   *
+   * 两个关键点：
+   * 1) 位移基准取元素内联 left/top，不用 getBoundingClientRect —— 悬浮标 hover 上有
+   *    translateY，用 rect 当基准会让「按下瞬间」的坐标偏 2px 并跳一下。
+   * 2) 不做 preventDefault —— 取消 pointerdown 会连带压掉兼容鼠标事件，某些浏览器下
+   *    click 就不触发了，悬浮标的「单击开关面板」会失效。防选中改由 CSS 的 user-select
+   *    + 拖拽期 html.lsb-drag-lock 全局锁承担。
+   */
+  function makeDraggable(el, handle, opts) {
+    opts = opts || {};
+    const onEnd = opts.onEnd || function () {};
+    let pid = null;
+    let moved = false;
+    let baseLeft = 0, baseTop = 0, startX = 0, startY = 0;
+
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return; // 右键留给「复位」
+      if (e.target.closest && e.target.closest('.lsb-ai-close')) return;
+
+      // 首次拖拽前先把 right/bottom 锚点换成 left/top
+      if (!el.style.left || el.style.left === 'auto') {
+        const r = measureUntransformed(el);
+        el.style.right = 'auto';
+        el.style.bottom = 'auto';
+        el.style.left = r.left + 'px';
+        el.style.top = r.top + 'px';
+      }
+      const p = currentPos(el);
+      baseLeft = p.left;
+      baseTop = p.top;
       startX = e.clientX;
       startY = e.clientY;
-      const rect = el.getBoundingClientRect();
-      origLeft = rect.left;
-      origTop = rect.top;
-      e.preventDefault();
+      moved = false;
+      pid = e.pointerId;
+      el.classList.add('lsb-dragging');
+      document.documentElement.classList.add('lsb-drag-lock');
+      try { handle.setPointerCapture(pid); } catch (_) {}
     });
 
-    document.addEventListener('mousemove', (e) => {
-      if (!dragging) return;
-      el.style.right = 'auto';
-      el.style.bottom = 'auto';
-      el.style.left = Math.max(0, origLeft + e.clientX - startX) + 'px';
-      el.style.top = Math.max(0, origTop + e.clientY - startY) + 'px';
+    handle.addEventListener('pointermove', (e) => {
+      if (pid === null || e.pointerId !== pid) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+      moved = true;
+      // 始终用 base + 总位移重算，而不是拿当前值累加，钳制到边缘后不会产生漂移
+      const c = clampToViewport(baseLeft + dx, baseTop + dy, el.offsetWidth, el.offsetHeight);
+      el.style.left = c.left + 'px';
+      el.style.top = c.top + 'px';
     });
 
-    document.addEventListener('mouseup', () => { dragging = false; });
+    function finish(e) {
+      if (pid === null) return;
+      if (e && e.pointerId !== undefined && e.pointerId !== pid) return;
+      pid = null;
+      el.classList.remove('lsb-dragging');
+      document.documentElement.classList.remove('lsb-drag-lock');
+      onEnd(moved);
+    }
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+    // 兜底：万一 setPointerCapture 没生效（事件跑到文档上），也别让拖拽态卡住
+    document.addEventListener('pointerup', finish);
+  }
+
+  // 两个视口矩形是否相交
+  function rectsIntersect(ax, ay, aw, ah, bx, by, bw, bh) {
+    return !(ax + aw <= bx || bx + bw <= ax || ay + ah <= by || by + bh <= ay);
+  }
+
+  /**
+   * 面板跟随悬浮标弹出：依次尝试「悬浮标上方 → 下方 → 左侧 → 右侧」，取第一个
+   * 「钳进视口后仍然不与悬浮标重叠」的位置。
+   *
+   * 为什么要挨个试而不是简单钳制：面板高约 600px，悬浮标一旦被拖到屏幕竖直中段，
+   * 上方（不到 470px）和下方（不到 280px）都塞不下；这时单纯 clamp 会把面板压回悬浮标身上，
+   * 于是「再点一下悬浮标收起面板」就点不到了——点下去打在面板上，用户会觉得按钮失灵。
+   */
+  function anchorPanelToFab() {
+    if (!panel) return;
+    const pw = panel.offsetWidth, ph = panel.offsetHeight; // 调用前面板必须已取消隐藏
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const GAP = 12;
+    if (!fab) {
+      placeEl(panel, vw - FAB_DEFAULT_RIGHT - pw, vh - FAB_DEFAULT_BOTTOM - 64 - GAP - ph);
+      return;
+    }
+    const fr = measureUntransformed(fab);
+    const midTop = fr.top + fr.height / 2 - ph / 2; // 左右并排时竖直居中对齐
+    const cands = [
+      { left: fr.right - pw, top: fr.top - GAP - ph },   // 上（右边缘对齐悬浮标）
+      { left: fr.right - pw, top: fr.bottom + GAP },     // 下
+      { left: fr.left - GAP - pw, top: midTop },         // 左
+      { left: fr.right + GAP, top: midTop },             // 右
+      { left: vw - 24 - pw, top: vh - 80 - ph }          // 兜底：老的右下角锚点
+    ];
+    let pick = null;
+    for (let i = 0; i < cands.length; i++) {
+      const cl = clampToViewport(cands[i].left, cands[i].top, pw, ph);
+      if (!rectsIntersect(cl.left, cl.top, pw, ph, fr.left, fr.top, fr.width, fr.height)) {
+        pick = cl;
+        break;
+      }
+    }
+    if (!pick) pick = clampToViewport(cands[0].left, cands[0].top, pw, ph);
+    placeEl(panel, pick.left, pick.top);
   }
 
   function showPanel() {
     if (!panel) return;
     panel.classList.remove('lsb-hidden');
-    if (!panel.style.left) {
-      panel.style.left = 'auto';
-      panel.style.top = 'auto';
-      panel.style.right = '24px';
-      panel.style.bottom = '80px';
-    }
+    // 没被用户手动拖过就贴着悬浮标弹；拖过则以用户的位置为准
+    if (!panelUserMoved) anchorPanelToFab();
   }
 
   function hidePanel() {

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>linux.sb 仿真帖子页 — 双脚本共存验证台</title>
+<style>
+  /* 站点自带样式的最小子集（非玻璃脚本管辖，仅让页面像个论坛） */
+  body { margin: 0; font-family: "Microsoft YaHei", sans-serif; background: #f5f7fb; color: #1f2937; }
+  .top { height: 56px; background: #fff; border-bottom: 1px solid #e5e7eb; display: flex; align-items: center; padding: 0 20px; }
+  .brand { font-weight: 700; }
+  .main-panel { max-width: 1100px; margin: 20px auto; background: #fff; border-radius: 12px; padding: 18px; }
+  .topic-post-list { list-style: none; padding: 0; margin: 0; }
+  .post-item { border-bottom: 1px solid #eef1f6; padding: 14px 4px; }
+  .post-title { font-weight: 600; margin-bottom: 6px; }
+  .post-content { line-height: 1.7; }
+  .post-ops { margin-top: 8px; display: flex; gap: 6px; }
+  .post-ops button { padding: 2px 8px; font-size: 12px; }
+</style>
+
+<!-- 玻璃脚本按 @run-at document-start 在 <head> 里跑；这里用内联脚本放在最前面模拟同样的时序。
+     不注入任何 GM_* 桩：两个脚本都自带 localStorage 兜底，正好也顺带验证该兜底路径。 -->
+<script src="/glass.user.js"></script>
+</head>
+<body>
+  <div class="top"><span class="brand">烧饼社区</span></div>
+
+  <div class="main-panel">
+    <ul class="topic-post-list">
+      <li class="post-item post-entry" data-floor="1">
+        <div class="post-title post-author">有没有人用过 zstd 压缩日志</div>
+        <div class="post-content">最近日志涨得厉害，想换 zstd，有人踩过坑吗。</div>
+      </li>
+      <li class="post-item post-entry" data-floor="2">
+        <div class="post-title post-author">回复 #1</div>
+        <div class="post-content">我用了半年，比 gzip 快不少，压缩率也更好。</div>
+        <div class="post-ops">
+          <a href="#" class="icon-quote">引用</a>
+          <button type="button" class="icon-action">删除</button>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+  <div style="height: 1200px"></div><!-- 撑出滚动条，方便测滚动保护层 -->
+
+  <!-- 水贴专用按 @run-at document-idle 在文档就绪后跑 -->
+  <script src="/water.user.js"></script>
+</body>
+</html>
