@@ -1204,6 +1204,12 @@
         out.push('\n- ' + inner);
         return;
       }
+      // 「回复可见」锁定段：服务端在渲染时就把它替换成了提示（HTML 里没有正文，无内容可读）。
+      // 把锁定提示（🔒 回复后可见…）换成对模型更有信息量的标记，否则模型会把提示当正文。
+      if (tag === 'section' && n.classList.contains('nb-editor-reply-visible-locked')) {
+        out.push('\n[🔒 此段内容设置了回复本主题后才可见，当前看不到]\n');
+        return;
+      }
       if (tag === 'br') { out.push('\n'); return; }
       if (tag === 'img') {
         // 多模态模式下图片保留为占位，URL 已单独收集
